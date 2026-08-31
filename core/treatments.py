@@ -19,7 +19,7 @@ from typing import List
 import config
 from config_2a import Condition
 from core.chunking import build_raw_chunks
-from core.graph_builder import build_causal_graph, build_entity_graph, build_semantic_graph
+from core.graph_builder import build_entity_graph, build_semantic_graph
 from core.augmentation_builder import augment_keywords, augment_note
 from core.memory_builder import MemoryBuilder
 from core.memory_store import MemoryStore
@@ -112,8 +112,6 @@ def build_memory_store(
             build_semantic_graph(store, top_n=3)
         elif condition.graph == "entity":
             build_entity_graph(store, chunks, llm)
-        elif condition.graph == "causal":
-            build_causal_graph(store, chunks, llm)
         else:
             raise ValueError(f"Unknown graph variant: {condition.graph}")
         return store

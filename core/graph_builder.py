@@ -1,10 +1,18 @@
 """
-Graph Builder — semantic / entity / causal edges over raw chunks.
+Graph Builder — semantic / entity edges over raw chunks.
 
-All three write edges into MemoryStore.graph (see core/memory_store.py).
+Both write edges into MemoryStore.graph (see core/memory_store.py).
 Node TEXT is never touched (same raw chunks as baseline) — only the edge
-set differs between the three graph variants, and vs. no edges at all
+set differs between the two graph variants, and vs. no edges at all
 (baseline / augmentation, where store.graph stays all-empty sets).
+
+causal (build_causal_graph) has been removed: on the LoCoMo scale used here
+it needed 2-hop traversal to be useful (a fixed lookback=5 backward-only
+candidate window, one LLM call per chunk) and consistently underperformed
+semantic/entity in the 2a runs without a clear story for why the graph
+dimension specifically should carry causal reasoning rather than the QA
+prompt itself. Kept out for now rather than reworked; see git history if
+it needs to come back.
 """
 from itertools import combinations
 from typing import Dict, List
@@ -119,42 +127,3 @@ def _high_frequency_entities(
     n_exclude = max(1, math.ceil(n * top_frequency_percentile))
     ranked = sorted(entity_index.items(), key=lambda kv: -len(kv[1]))
     return {name for name, _ in ranked[:n_exclude]}
-
-
-# ---------------------------------------------------------------------- #
-# causal: LLM looks at each chunk together with a short window of PRECEDING
-# chunks (already-processed, so causality only points backward — matches
-# conversation chronology) and decides which prior chunk(s), if any, this
-# one is a causal consequence of. Explicit edges -> multi-hop graph
-# traversal at retrieval time. Distinguish from augmentation="causal",
-# which only appends a free-text causal description to a chunk without
-# building traversable structure.
-# ---------------------------------------------------------------------- #
-def build_causal_graph(
-    store: MemoryStore, chunks: List[MemoryEntry], llm: LLMClient, lookback: int = 5
-) -> None:
-    for i, chunk in enumerate(chunks):
-        if i == 0:
-            continue
-        candidates = chunks[max(0, i - lookback) : i]
-        cand_block = "\n".join(
-            f"[{j}] {c.lossless_restatement[:200]}" for j, c in enumerate(candidates)
-        )
-        prompt = f"""Here are some earlier dialogue excerpts (indexed [0]..[{len(candidates)-1}]) and one later excerpt.
-Which earlier excerpt(s), if any, is the LATER excerpt a direct causal consequence of (i.e. the earlier one explains WHY the later one happens)?
-
-Earlier excerpts:
-{cand_block}
-
-Later excerpt:
-{chunk.lossless_restatement[:300]}
-
-Return a JSON array of indices (integers) of the earlier excerpts that causally lead to the later one. Empty array if none. Return ONLY the JSON array."""
-        try:
-            resp = llm.chat_completion([{"role": "user", "content": prompt}], temperature=0.0)
-            idxs = coerce_json_list(llm.extract_json(resp), context="causal-link extraction")
-        except Exception:
-            idxs = []
-        for idx in idxs:
-            if isinstance(idx, int) and 0 <= idx < len(candidates):
-                store.add_edge(chunk.entry_id, candidates[idx].entry_id, bidirectional=False)

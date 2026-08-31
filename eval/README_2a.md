@@ -3,10 +3,10 @@
 ## 文件结构（相对你原来的 MemSuit repo）
 
 **新增文件**
-- `config_2a.py` —— 8 个 condition 的矩阵定义（1 baseline + 2 summary + 2 augmentation + 3 graph）
+- `config_2a.py` —— 7 个 condition 的矩阵定义（1 baseline + 2 summary + 2 augmentation + 2 graph）
 - `core/chunking.py` —— baseline/augmentation/graph 三者共用的 raw chunk（不经 LLM 改写）
 - `core/augmentation_builder.py` —— keywords / note 两个变体的逐 chunk LLM 抽取（见下）
-- `core/graph_builder.py` —— semantic / entity / causal 三种图构建
+- `core/graph_builder.py` —— semantic / entity 两种图构建
 - `core/memory_store.py` —— 四个维度共用的内存态检索后端，附带 BM25 索引和图邻接表
 - `core/bm25.py` —— 轻量 Okapi BM25 实现，无外部依赖
 - `core/fusion.py` —— Reciprocal Rank Fusion 工具函数
@@ -52,18 +52,19 @@
 
 这跟 keywords 变体是同一件事的两条不同实现路径：keywords 让抽出来的东西走稀疏检索（BM25），note 让抽出来的东西（外加一点解释性上下文）走稠密检索（embedding）。两者构建期都是每个 chunk 恰好一次 LLM 调用，成本上跟 summary 同量级，方便做"同样的抽取成本，走哪条检索路径更有效"这个层面的对比。
 
-### graph：semantic / entity / causal，见 `core/graph_builder.py`
+### graph：semantic / entity，见 `core/graph_builder.py`
+
+**为什么去掉 causal**：`build_causal_graph` 固定用 backward-only、lookback=5 的候选窗口逐 chunk 调 LLM 判因果，是三个图变体里成本最高的一个（entity 也是逐 chunk 调用，但只需 1 hop 就能用；causal 的因果链要 2 hop 才能体现出跟 semantic/entity 的差异，检索延迟和构建成本都明显更高），在 2a 的初步跑分里也没有看到它相对 semantic/entity 有稳定优势，先砍掉降低复杂度，专注把 semantic/entity 这两个更便宜、更容易讲清楚故事的变体做扎实。
 
 **entity 图加了高频实体过滤**（`build_entity_graph` 里的 `_high_frequency_entities`）：session 数一多，主角名字这种实体会出现在几乎所有 chunk 里，"共享实体就连边"的规则会让 `combinations(n, 2)` 炸出成千上万条边，图直接塌陷成近乎全连接——检索时沿边扩展基本等于把整个记忆库都捞出来，graph 维度名存实亡。现在按实体的文档频率（出现在多少个不同 chunk 里）排序，**频率排进 top 1% 的实体直接不参与建边**（但仍然保留在 `chunk.metadata["entities"]` 里，只是不用来连边）。类比 BM25 用 IDF 压低高频词权重的思路，只是这里的边是二元的（连/不连），没有连续分数可压，所以是硬过滤而不是降权。
 
 小样本保护：如果一个对话总共抽出来的不同实体数少于 20 个（`min_entities_for_filtering`），直接跳过过滤——短对话里"1%"这种统计量没什么意义，硬砍掉出现频率最高的那个实体（很可能就是某个说话人自己的名字）弊大于利。
 
-（semantic 图的 O(N²) 相似度矩阵在 LoCoMo 规模下不是瓶颈，没有改；causal 图目前还是固定 lookback=5 的候选窗口，如果因果链条经常跨 session，这个候选集大小可能需要调整——见下面的"已知待办"。）
+（semantic 图的 O(N²) 相似度矩阵在 LoCoMo 规模下不是瓶颈，没有改。）
 
 ## 已知待办（session 数量大时）
 
-- **entity/causal 图的 LLM 调用次数是 O(chunk 数)**：目前是每个 chunk 单独调一次 LLM 抽实体/判因果。session 一多、chunk 数上去之后调用次数会线性增长，是主要的成本瓶颈，还没做批量化（把连续几个 chunk 打包进同一次请求）。
-- **causal 图的候选窗口是固定 `lookback=5`**：只看最近 5 个 chunk 作为因果候选，如果因果链条跨了好几个 session（远因），会直接漏掉，目前还没加"embedding 最相似的更早 chunk"作为补充候选集。
+- **entity 图的 LLM 调用次数是 O(chunk 数)**：目前是每个 chunk 单独调一次 LLM 抽实体。session 一多、chunk 数上去之后调用次数会线性增长，是主要的成本瓶颈，还没做批量化（把连续几个 chunk 打包进同一次请求）。
 
 ---
 
@@ -75,7 +76,7 @@
 
 见 `utils/llm_client.py::coerce_json_list()`：Qwen3-0.6B 经常忽略"返回 JSON 数组"的要求、直接吐一个裸对象（尤其是 `single_entry_mode` 下"只有一条"很容易被理解成"一个对象"而不是"长度为1的数组"）。`memory_builder.py` 和 `augmentation_builder.py` 里所有解析 LLM 输出的地方都统一走这个函数，容忍常见的畸形形状，避免白白重试 3 次导致整段数据丢失。
 
-**给 0.6B 模型的成本提示**：`summary`（每个 window 1-2 次）、`augmentation="keywords"`（每个 chunk 1 次）、`augmentation="note"`（每个 chunk 1 次）都是构建期一次过、检索期不再调 LLM，成本量级相当；`graph="semantic"` 完全不需要 LLM。`graph="entity"`/`graph="causal"` 仍然是逐 chunk 调用，成本最高。建议先跑 `--max-conversations 1` 摸一下各 condition 的耗时差异。
+**给 0.6B 模型的成本提示**：`summary`（每个 window 1-2 次）、`augmentation="keywords"`（每个 chunk 1 次）、`augmentation="note"`（每个 chunk 1 次）都是构建期一次过、检索期不再调 LLM，成本量级相当；`graph="semantic"` 完全不需要 LLM。`graph="entity"` 仍然是逐 chunk 调用，成本最高。建议先跑 `--max-conversations 1` 摸一下各 condition 的耗时差异。
 
 ---
 
@@ -126,5 +127,8 @@ python eval/run_2a_locomo.py --data data/locomo10.json --out-dir results \
 | n_retrieved | 实际检索到的 memory 单元数 |
 | latency_sec | 单条 QA 的检索+生成耗时 |
 | n_memory_units | 该 condition 下这个对话构建了多少个 memory 单元 |
+| evidence_total | 这条 QA 的 gold evidence 轮次数（LoCoMo `qa[].evidence`），adversarial 等无标注问题为 0 |
+| evidence_covered | 有多少条 gold evidence 轮次落在某个被检索到的 memory 单元的 `dia_id_start..dia_id_end` 范围内 |
+| retrieval_recall | `evidence_covered / evidence_total`，`evidence_total==0` 时留空（不是 0）——见 `eval/analysis/retrieval_recall.py` |
 
 脚本跑完会打印 `condition × category` 的 F1 透视表，用来肉眼判断异质效应存在与否。

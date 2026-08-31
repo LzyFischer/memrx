@@ -55,8 +55,12 @@ afterthought, so augmentation stays comparable in cost to summary rather
 than ballooning into a graph-dimension-style O(chunks) with multi-field
 extraction.
 
-"causal" was removed earlier and stays removed — see graph_builder.py /
-graph="causal" for why (it's a graph concept, not a per-chunk one).
+"causal" was removed earlier and stays removed — a causal link is inherently
+a pointer to another chunk, not a fact about one chunk in isolation, so it
+belongs to the graph dimension's edge structure rather than here. (graph
+also no longer has a "causal" variant — see core/graph_builder.py — but the
+reasoning for why this augmentation-level version doesn't belong here is
+unaffected by that.)
 """
 from typing import List
 

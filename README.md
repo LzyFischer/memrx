@@ -40,9 +40,9 @@ results/                     # 实验输出 CSV/JSON
 pip install -r requirements.txt
 # 把 locomo10.json 放进 data/ (见 data/README.md)
 
-vllm serve Qwen/Qwen3-0.6B --host 0.0.0.0 --port 8000 --max-model-len 16384
+vllm serve Qwen/Qwen3-1.7B --host 0.0.0.0 --port 8000 --max-model-len 16384
 
 python eval/run_2a_locomo.py --data data/locomo10.json \
-    --model Qwen/Qwen3-0.6B --base-url http://localhost:8000/v1 \
+    --model Qwen/Qwen3-1.7B --base-url http://localhost:8000/v1 \
     --out-dir results --max-conversations 1   # 先小样本跑通
 ```

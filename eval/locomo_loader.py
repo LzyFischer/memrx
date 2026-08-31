@@ -30,16 +30,60 @@ def load_locomo(path: str) -> List[Dict[str, Any]]:
         return json.load(f)
 
 
-def sample_to_dialogues(sample: Dict[str, Any]) -> List[Dialogue]:
-    """Flatten a LoCoMo sample's sessions into a chronological Dialogue list."""
+def _sorted_session_keys(sample: Dict[str, Any]) -> List[str]:
     conv = sample["conversation"]
-    session_keys = sorted(
+    return sorted(
         [k for k in conv.keys() if re.fullmatch(r"session_\d+", k)],
         key=lambda x: int(x.split("_")[1]),
     )
+
+
+def build_dia_id_index(sample: Dict[str, Any]) -> Dict[str, int]:
+    """Map each turn's original LoCoMo ``dia_id`` string (e.g. ``"D1:3"``) to
+    the flat integer ``dialogue_id`` used by ``sample_to_dialogues`` below —
+    same session order, same turn order, so the two stay in sync as long as
+    both keep iterating ``conv[sk]`` in file order.
+
+    Needed to resolve QA ``"evidence"`` lists (also given as ``"D1:3"``-style
+    strings) against the flat ids stamped onto retrieved MemoryEntry objects
+    via ``metadata["dia_id_start"/"dia_id_end"]`` (see core/chunking.py and
+    core/memory_builder.py::_stamp_source_range), for the retrieval-recall
+    analysis (2a preliminary experiment 3).
+    """
+    conv = sample["conversation"]
+    index: Dict[str, int] = {}
+    dia_counter = 0
+    for sk in _sorted_session_keys(sample):
+        for turn in conv[sk]:
+            raw_id = turn.get("dia_id")
+            if raw_id:
+                index[raw_id] = dia_counter
+            dia_counter += 1
+    return index
+
+
+def evidence_flat_ids(qa: Dict[str, Any], dia_id_index: Dict[str, int]) -> List[int]:
+    """Resolve a QA's gold ``evidence`` dia_id strings to flat integer ids.
+
+    Returns ``[]`` when the QA has no (or an unresolvable) evidence list —
+    notably LoCoMo's category-5 (adversarial) questions, which aren't
+    annotated with evidence turns. Callers should treat an empty list as
+    "retrieval recall not defined for this question", not as "recall = 0".
+    """
+    ids = []
+    for raw in qa.get("evidence", []) or []:
+        idx = dia_id_index.get(raw)
+        if idx is not None:
+            ids.append(idx)
+    return ids
+
+
+def sample_to_dialogues(sample: Dict[str, Any]) -> List[Dialogue]:
+    """Flatten a LoCoMo sample's sessions into a chronological Dialogue list."""
+    conv = sample["conversation"]
     dialogues: List[Dialogue] = []
     dia_counter = 0
-    for sk in session_keys:
+    for sk in _sorted_session_keys(sample):
         date_str = conv.get(f"{sk}_date_time", "")
         for turn in conv[sk]:
             speaker = turn.get("speaker", "")

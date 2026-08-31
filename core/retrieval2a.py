@@ -17,14 +17,14 @@ retrieve(store, query, condition, llm, top_k) -> List[MemoryEntry]
     construction time (core/augmentation_builder.py::augment_note), so it's
     already part of what got embedded. Plain semantic search, same as
     baseline/summary.
-  - graph(semantic/entity/causal): embedding search picks SEED nodes, then
-    the store's graph is traversed 1-2 hops to pull in connected nodes.
+  - graph(semantic/entity): embedding search picks SEED nodes, then the
+    store's graph is traversed 1 hop to pull in connected nodes.
 
 augmentation="temporal" and augmentation="causal" have both been removed
 from this dimension — see core/augmentation_builder.py for the current
 "keywords" / "note" design and why temporal's independent-signal-plus-RRF
-machinery was dropped, and core/graph_builder.py for why causal now lives
-only under graph="causal".
+machinery was dropped. graph="causal" has also been removed — see
+core/graph_builder.py.
 """
 from typing import List, Optional
 
@@ -49,8 +49,7 @@ def retrieve(
             return store.semantic_search(query, top_k=top_k)
 
     if condition.dimension == "graph":
-        hops = 2 if condition.graph == "causal" else 1
-        return _retrieve_graph(store, query, top_k, hops=hops)
+        return _retrieve_graph(store, query, top_k, hops=1)
 
     return store.semantic_search(query, top_k=top_k)
 

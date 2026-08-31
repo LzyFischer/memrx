@@ -29,7 +29,8 @@ from config_2a import build_condition_matrix, RETRIEVAL_TOP_K, WINDOW_SIZE, OVER
 from core.retrieval2a import retrieve
 from core.treatments import build_memory_store
 from eval.locomo_loader import (
-    CATEGORY_NAMES, build_qa_prompt, exact_match, f1_score, load_locomo, sample_to_dialogues,
+    CATEGORY_NAMES, build_dia_id_index, build_qa_prompt, evidence_flat_ids, exact_match,
+    f1_score, load_locomo, sample_to_dialogues,
 )
 from utils.embedding import EmbeddingModel
 from utils.llm_client import LLMClient
@@ -47,7 +48,21 @@ def format_context(entries, max_chars: int = 6000) -> str:
     return "\n".join(parts)
 
 
-def run_one_qa(llm: LLMClient, store, condition, qa, top_k: int):
+def _entry_covers_dialogue(entry, dia_id: int) -> bool:
+    """True if `entry` was built from a raw-chunk / summary window whose
+    source dialogue-turn range ([dia_id_start, dia_id_end], inclusive)
+    contains `dia_id`. Every condition stamps this metadata identically —
+    baseline/augmentation/graph via core/chunking.py::build_raw_chunks,
+    summary via core/memory_builder.py::_stamp_source_range — so retrieval
+    recall is comparable across all 4 dimensions."""
+    start = entry.metadata.get("dia_id_start")
+    end = entry.metadata.get("dia_id_end")
+    if start is None or end is None:
+        return False
+    return start <= dia_id <= end
+
+
+def run_one_qa(llm: LLMClient, store, condition, qa, top_k: int, evidence_ids=None):
     category = int(qa.get("category", 1))
     question = qa["question"]
     gold = qa.get("answer", "")
@@ -57,6 +72,17 @@ def run_one_qa(llm: LLMClient, store, condition, qa, top_k: int):
     t0 = time.time()
     retrieved = retrieve(store, question, condition, llm=llm, top_k=top_k)
     context = format_context(retrieved)
+
+    # Retrieval-phase recall against LoCoMo's gold evidence turns (2a
+    # preliminary experiment 3, "retrieval phase单独算recall"). Undefined
+    # (empty string, not 0) when the QA has no evidence annotation — e.g.
+    # category 5 / adversarial — so it doesn't silently drag down averages.
+    evidence_ids = evidence_ids or []
+    evidence_total = len(evidence_ids)
+    evidence_covered = sum(
+        1 for d in evidence_ids if any(_entry_covers_dialogue(e, d) for e in retrieved)
+    )
+    retrieval_recall = (evidence_covered / evidence_total) if evidence_total else None
     prompt = build_qa_prompt(context, question, category)
 
     try:
@@ -94,6 +120,9 @@ def run_one_qa(llm: LLMClient, store, condition, qa, top_k: int):
         "em": exact_match(pred, str(gold)),
         "n_retrieved": len(retrieved),
         "latency_sec": round(latency, 3),
+        "evidence_total": evidence_total,
+        "evidence_covered": evidence_covered,
+        "retrieval_recall": "" if retrieval_recall is None else round(retrieval_recall, 4),
     }
 
 
@@ -140,6 +169,7 @@ def main():
         "sample_id", "condition_id", "dimension", "summary", "augmentation", "graph",
         "category", "category_name", "question", "gold", "prediction",
         "f1", "em", "n_retrieved", "latency_sec", "n_memory_units",
+        "evidence_total", "evidence_covered", "retrieval_recall",
     ]
     results = []
     # Resume support: skip (sample_id, condition_id, question) triples already done.
@@ -162,6 +192,7 @@ def main():
     for sample_idx, sample in enumerate(data):
         sample_id = str(sample.get("sample_id", sample_idx))
         dialogues = sample_to_dialogues(sample)
+        dia_id_index = build_dia_id_index(sample)
         qas = sample.get("qa", [])
         print(f"\n[conv {sample_idx+1}/{len(data)}] {sample_id}: {len(dialogues)} turns, {len(qas)} QAs")
 
@@ -181,7 +212,8 @@ def main():
             print(f"  [{condition.condition_id}] {len(store)} memory units built in {build_time:.1f}s")
 
             for qa in pending_qas:
-                rec = run_one_qa(llm, store, condition, qa, args.top_k)
+                evidence_ids = evidence_flat_ids(qa, dia_id_index)
+                rec = run_one_qa(llm, store, condition, qa, args.top_k, evidence_ids)
                 rec.update({
                     "sample_id": sample_id,
                     "condition_id": condition.condition_id,

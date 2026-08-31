@@ -17,3 +17,7 @@ rank-bm25>=0.2.2
 nltk>=3.8.0
 rouge-score>=0.1.2
 bert-score>=0.3.13
+
+# 2a analysis (eval/analysis/) — not needed to run the experiment itself
+pandas>=2.0.0
+matplotlib>=3.7.0

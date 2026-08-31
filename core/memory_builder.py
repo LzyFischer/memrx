@@ -201,7 +201,9 @@ class MemoryBuilder:
         for attempt in range(3):
             try:
                 response = self.llm_client.chat_completion(messages, temperature=0.1, response_format=response_format)
-                return self._parse_response(response)
+                entries = self._parse_response(response)
+                self._stamp_source_range(entries, dialogues)
+                return entries
             except Exception as e:
                 if attempt < 2:
                     print(f"  Extraction attempt {attempt + 1}/3 failed: {e} — retrying")
@@ -231,6 +233,25 @@ class MemoryBuilder:
         if self.single_entry_mode and len(entries) > 1:
             entries = entries[:1]
         return entries
+
+    @staticmethod
+    def _stamp_source_range(entries: List[MemoryEntry], dialogues: List[Dialogue]) -> None:
+        """Record which raw dialogue turns this window's entries were built
+        from, using the same metadata keys as core/chunking.py::build_raw_chunks
+        (dia_id_start / dia_id_end) so retrieval-recall analysis can locate
+        gold-evidence turns regardless of which dimension produced the entry
+        (2a preliminary experiment 3 — see eval/analysis/retrieval_recall.py).
+        This is a window-level range, not a per-entry one: adaptive_split_mode
+        can split one window into several entries, and there's no LLM-side
+        signal for which sub-span of the window each split entry came from,
+        so every entry generated from the same window gets the same range.
+        """
+        if not dialogues:
+            return
+        start, end = dialogues[0].dialogue_id, dialogues[-1].dialogue_id
+        for e in entries:
+            e.metadata.setdefault("dia_id_start", start)
+            e.metadata.setdefault("dia_id_end", end)
 
     # ------------------------------------------------------------------
     # Prompt
