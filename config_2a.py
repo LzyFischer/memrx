@@ -21,10 +21,8 @@ from dataclasses import dataclass
 from typing import Literal
 
 SummaryVariant = Literal["none", "session_level", "fine_grained"]
-AugmentationVariant = Literal["none", "keywords"]
-GraphVariant = Literal["none"]
-# AugmentationVariant = Literal["none", "keywords", "note"]
-# GraphVariant = Literal["none", "semantic", "entity", "causal"]
+AugmentationVariant = Literal["none", "keywords", "note"]
+GraphVariant = Literal["none", "semantic", "entity", "causal"]
 
 @dataclass
 class Condition:

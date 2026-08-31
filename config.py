@@ -3,7 +3,7 @@
 # ── LLM 配置 ──────────────────────────────────────────────
 OPENAI_API_KEY = "EMPTY"                          # vLLM 默认不校验,填 EMPTY 或任意字符串
 OPENAI_BASE_URL = "http://localhost:8000/v1"
-LLM_MODEL = "Qwen/Qwen3-0.6B"
+LLM_MODEL = "Qwen/Qwen3-1.7B"
 
 # Qwen3 系列默认开启 thinking mode（chat template 会自动生成 <think>...</think>）。
 # 不需要在这里手动开关生成行为——vLLM serve 时思考与否由模型自身的 chat template
@@ -23,7 +23,7 @@ USE_STREAMING = False          # 调试期保持关闭,稳定后可开
 ENABLE_THINKING = False
 
 # ── 并发可以适当调高,vLLM 的 batching 比 Ollama 强很多 ──────
-WINDOW_SIZE = 20               # 可以恢复到原值
+WINDOW_SIZE = 5               # 可以恢复到原值
 OVERLAP_SIZE = 2
 MAX_PARALLEL_WORKERS = 8       # vLLM 内部有 continuous batching,并发收益明显
 MAX_RETRIEVAL_WORKERS = 8

@@ -69,7 +69,6 @@ class MemoryBuilder:
 
         self.dialogue_buffer: List[Dialogue] = []
         self.processed_count: int = 0
-        self.previous_entries: List[MemoryEntry] = []  # context for next window
 
     # ------------------------------------------------------------------
     # Public interface
@@ -113,7 +112,6 @@ class MemoryBuilder:
         entries = self._generate_entries(window)
         if entries:
             self.vector_store.add_entries(entries)
-            self.previous_entries = entries
             self.processed_count += len(window)
         print(f"  → {len(entries)} memory entries generated")
 
@@ -164,7 +162,6 @@ class MemoryBuilder:
         if all_entries:
             self.vector_store.add_entries(all_entries)
             self.processed_count += sum(len(w) for w in windows)
-            self.previous_entries = all_entries[-10:]
         print(f"[Parallel] Done — {len(all_entries)} total entries")
 
     def _generate_entries_worker(
@@ -182,13 +179,7 @@ class MemoryBuilder:
     def _generate_entries(self, dialogues: List[Dialogue]) -> List[MemoryEntry]:
         dialogue_text = "\n".join(str(d) for d in dialogues)
 
-        context = ""
-        if self.previous_entries:
-            context = "\n[Previous entries — avoid duplication]\n"
-            for e in self.previous_entries[:3]:
-                context += f"- {e.lossless_restatement}\n"
-
-        prompt = self._extraction_prompt(dialogue_text, context)
+        prompt = self._extraction_prompt(dialogue_text)
         messages = [
             {
                 "role": "system",
@@ -245,26 +236,25 @@ class MemoryBuilder:
     # Prompt
     # ------------------------------------------------------------------
 
-    def _extraction_prompt(self, dialogue_text: str, context: str) -> str:
+    def _extraction_prompt(self, dialogue_text: str) -> str:
         if self.single_entry_mode:
-            return self._single_entry_prompt(dialogue_text, context)
+            return self._single_entry_prompt(dialogue_text)
         if self.adaptive_split_mode:
-            return self._adaptive_split_prompt(dialogue_text, context)
+            return self._adaptive_split_prompt(dialogue_text)
         return f"""
 Your task is to extract all valuable information from the following dialogues and convert them into structured memory entries.
-
-{context}
 
 [Current Window Dialogues]
 {dialogue_text}
 
 [Requirements]
-1. **Complete Coverage**: Generate enough memory entries to ensure ALL information in the dialogues is captured
+1. Write timestamps to all entries.
+1. **Complete Coverage**: Generate enough memory entries to ensure ALL information in the dialogues is captured.
 2. **Force Disambiguation**: Absolutely PROHIBIT using pronouns (he, she, it, they, this, that) and relative time (yesterday, today, last week, tomorrow). Use full names and absolute ISO 8601 timestamps inline.
 3. **Lossless Information**: Each entry's lossless_restatement must be a complete, independent, understandable sentence that includes all relevant subjects, objects, time, and location inline.
 
 [Output Format]
-Return a JSON array. Each element is a memory entry with a single field:
+Return a JSON array. Each element is a memory entry:
 
 ```json
 [
@@ -278,7 +268,7 @@ Return a JSON array. Each element is a memory entry with a single field:
 Now process the above dialogues. Return ONLY the JSON array, no other explanations.
 """
 
-    def _single_entry_prompt(self, dialogue_text: str, context: str) -> str:
+    def _single_entry_prompt(self, dialogue_text: str) -> str:
         """
         Granularity-ablation prompt: compress the entire window into ONE
         memory entry. Same disambiguation rules as the default prompt; only
@@ -287,16 +277,15 @@ Now process the above dialogues. Return ONLY the JSON array, no other explanatio
         return f"""
 Your task is to compress the following dialogues into a SINGLE memory entry that preserves every piece of information necessary to answer downstream questions.
 
-{context}
-
 [Current Window Dialogues]
 {dialogue_text}
 
 [Requirements]
-1. **Exactly ONE entry**: The output JSON array MUST contain exactly one element. 
-2. **Complete Coverage**: Ensure ALL information in the dialogues is captured.
+1. Write timestamps to the lossless restatement.
+1. **Complete Coverage**:  Ensure ALL information in the dialogues is captured.
+2. **Exactly ONE entry**: The output JSON array MUST contain exactly one element.
 3. **Force Disambiguation**: Absolutely PROHIBIT using pronouns (he, she, it, they, this, that) and relative time (yesterday, today, last week, tomorrow). Use full names and absolute ISO 8601 timestamps inline.
-4. **Lossless Information**: The single lossless_restatement must be a self-contained, independently understandable text that includes all relevant subjects, objects, times, and locations inline.
+4. **Lossless Information**: The single lossless_restatement must be a self-contained, independently understandable text that includes all relevant information.
 
 [Output Format]
 Return a JSON array with EXACTLY ONE element:
@@ -304,7 +293,7 @@ Return a JSON array with EXACTLY ONE element:
 ```json
 [
   {{
-    "lossless_restatement": "Complete, dense, unambiguous restatement that includes every fact from the window"
+    "lossless_restatement": "Complete, dense, unambiguous restatement that includes every fact and time stamp from the window"
   }}
 ]
 ```
@@ -312,7 +301,7 @@ Return a JSON array with EXACTLY ONE element:
 Now process the above dialogues. Return ONLY the JSON array (length 1), no other explanations.
 """
 
-    def _adaptive_split_prompt(self, dialogue_text: str, context: str) -> str:
+    def _adaptive_split_prompt(self, dialogue_text: str) -> str:
         """
         NON-TARGET adaptive entry decomposition prompt: split the window into
         multiple retrieval-ready memory entries. The model decides the number
@@ -322,21 +311,19 @@ Now process the above dialogues. Return ONLY the JSON array (length 1), no other
         instruction differs.
         """
         return f"""
-Your task is to split the following dialogues into multiple memory entries. These entries will be stored in a database and later retrieved to answer questions about the conversation — but you are NOT told what the questions will be, so decompose the content purely on its own terms.
-
-{context}
+Your task is to extract all valuable information from the following dialogues and convert them into structured memory entries.
 
 [Current Window Dialogues]
 {dialogue_text}
 
 [Requirements]
-1. **Adaptive Decomposition**: YOU decide how many entries to produce and where to draw the boundaries. Split the dialogue into self-contained units at whatever granularity you judge most useful for retrieval.
-2. **Full Partition**: Do not drop content, and avoid repeating the same fact across multiple entries.
-3. **Force Disambiguation**: Absolutely PROHIBIT using pronouns (he, she, it, they, this, that) and relative time (yesterday, today, last week, tomorrow). Use full names and absolute ISO 8601 timestamps inline.
-4. **Self-Contained Entries**: Each entry's lossless_restatement must be a complete, independent, understandable sentence that includes all relevant subjects, objects, time, and location inline, so that the entry makes sense when retrieved on its own.
+1. Write timestamps to all entries.
+1. **Complete Coverage**: Generate enough memory entries to ensure ALL information in the dialogues is captured, add timestamps to all entries.
+2. **Force Disambiguation**: Absolutely PROHIBIT using pronouns (he, she, it, they, this, that) and relative time (yesterday, today, last week, tomorrow). Use full names and absolute ISO 8601 timestamps inline.
+3. **Lossless Information**: Each entry's lossless_restatement must be a complete, independent, understandable sentence that includes all relevant subjects, objects, time, and location inline.
 
 [Output Format]
-Return a JSON array. Each element is a memory entry with a single field:
+Return a JSON array. Each element is a memory entry:
 
 ```json
 [

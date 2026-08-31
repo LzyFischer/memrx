@@ -60,13 +60,28 @@ def run_one_qa(llm: LLMClient, store, condition, qa, top_k: int):
     prompt = build_qa_prompt(context, question, category)
 
     try:
-        pred = llm.chat_completion(
+        raw = llm.chat_completion(
             [{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=1024,  # generous headroom for Qwen3 thinking-mode trace + short answer
         ).strip()
     except Exception as e:
-        pred = f"[error] {e}"
+        raw = f"[error] {e}"
+
+    # build_qa_prompt now asks for {"reasoning": ..., "answer": ...} JSON —
+    # pull out just "answer" for scoring. Falls back to the raw text if the
+    # model didn't produce valid JSON (rare, but small models occasionally
+    # ignore the format instruction), so a parse miss never turns into an
+    # empty prediction.
+    pred = raw
+    try:
+        parsed = llm.extract_json(raw)
+        if isinstance(parsed, dict):
+            answer = parsed.get("answer")
+            if isinstance(answer, str) and answer.strip():
+                pred = answer.strip()
+    except Exception:
+        pass
     latency = time.time() - t0
 
     return {

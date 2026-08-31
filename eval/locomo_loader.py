@@ -17,30 +17,12 @@ from typing import Any, Dict, List, Tuple
 
 from models.memory_entry import Dialogue
 
-ANSWER_PROMPT = {
-    1: ("Based on the above conversations, write short answers for each of the "
-        "following questions in a few words. Write the answers in the form of a "
-        "short phrase for each question. Answer with exact words from the "
-        "conversations whenever possible."),
-    2: ("Based on the above conversations, write short answers for each of the "
-        "following questions in a few words. Write the answers in the form of a "
-        "short phrase for each question. Answer with exact words from the "
-        "conversations whenever possible."),
-    3: ("Based on the above conversations, write short answers for each of the "
-        "following questions using DATE of CONVERSATION for reference. Write the "
-        "answer in the form of a short phrase. The answers need to be "
-        "grounded in the dates of the conversations. Answer with exact words "
-        "from the conversations whenever possible."),
-    4: ("Based on the above conversations, answer the following question. Use "
-        "DATE of CONVERSATION to answer with an approximate date. Answer with "
-        "exact words from the conversation whenever possible."),
-    5: ("Based on the above conversations, answer the following question. "
-        "Write the answer as \"Not mentioned in the conversation\" if the "
-        "information is not present in the conversation. Otherwise write a "
-        "short phrase as the answer."),
-}
-DEFAULT_ANSWER_PROMPT = ANSWER_PROMPT[1]
-CATEGORY_NAMES = {1: "single_hop", 2: "multi_hop", 3: "temporal", 4: "open_domain", 5: "adversarial"}
+# Single, uniform answer-generation prompt for every category — no more
+# per-category rule text. The JSON {reasoning, answer} shape is kept (see
+# run_2a_locomo.py::run_one_qa, which parses out "answer" for scoring) since
+# forcing a "reasoning" field first is what stops the model from just
+# echoing a context line's "[N]" label as if that were the answer.
+CATEGORY_NAMES = {1: "multi_hop", 2: "temporal", 3: "open_domain", 4: "single_hop", 5: "adversarial"}
 
 
 def load_locomo(path: str) -> List[Dict[str, Any]]:
@@ -72,9 +54,32 @@ def sample_to_dialogues(sample: Dict[str, Any]) -> List[Dialogue]:
     return dialogues
 
 
-def build_qa_prompt(context: str, question: str, category: int) -> str:
-    instr = ANSWER_PROMPT.get(category, DEFAULT_ANSWER_PROMPT)
-    return f"{context}\n\n{instr}\n\nQuestion: {question}\nAnswer:"
+def build_qa_prompt(context: str, question: str, category: int = 1) -> str:
+    return f"""
+Answer the user's question based on the provided context.
+
+User Question: {question}
+
+Relevant Context:
+{context}
+
+Requirements:
+1. First, think through the reasoning process
+2. Then provide a very CONCISE answer (short phrase about core information)
+3. Answer must be based ONLY on the provided context
+4. All dates in the response must be formatted as 'DD Month YYYY' but you can output more or less details if needed
+5. Return your response in JSON format
+
+Output Format:
+```json
+{{
+  "reasoning": "Brief explanation of your thought process",
+  "answer": "Concise answer in a short phrase"
+}}
+```
+
+Now answer the question. Return ONLY the JSON, no other text.
+"""
 
 
 def normalize_answer(s: str) -> str:

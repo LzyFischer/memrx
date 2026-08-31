@@ -23,15 +23,30 @@ to present side by side:
     channel reflect what the LLM judged salient, not just what's frequent,
     which is the more interesting comparison for the ablation.
 
-  - "note": LLM extracts keywords + a short context note per chunk
-    (metadata["keywords"], metadata["note"]) and the note is appended
-    directly after the raw chunk text, becoming part of
-    entry.lossless_restatement — the single field MemoryStore embeds (see
-    core/memory_store.py::add_batch). So this variant needs no special
-    retrieval path at all; it's plain semantic search over raw-text+note,
-    same as baseline/summary (core/retrieval2a.py). The raw text itself is
-    never rewritten, only appended to — chunking.py's isolation argument
-    (augmentation only ADDS on top of the same raw chunk) still holds.
+  - "note": LLM extracts a handful of SHORT, CONCRETE fields per chunk —
+    keywords, timestamp, location, persons, entities, topic (metadata["keywords"],
+    metadata["persons"], etc.) — and a note built by templating those fields
+    together (metadata["note"]) is appended directly after the raw chunk
+    text, becoming part of entry.lossless_restatement — the single field
+    MemoryStore embeds (see core/memory_store.py::add_batch). So this
+    variant needs no special retrieval path at all; it's plain semantic
+    search over raw-text+note, same as baseline/summary (core/retrieval2a.py).
+    The raw text itself is never rewritten, only appended to — chunking.py's
+    isolation argument (augmentation only ADDS on top of the same raw chunk)
+    still holds.
+
+    This is a deliberate change from an earlier version of this file, where
+    the model was asked to freely write a 1-2 sentence "context" summary
+    (a mini compression task) rather than fill in short, concrete fields.
+    That free-text summary turned out to be the weak point — a 0.6B model
+    writing open-ended prose is exactly the failure mode that hurts the
+    summary dimension too (vague, occasionally hallucinated). Every field
+    here is either a short list (keywords/persons/entities) or a single
+    short phrase (location/timestamp/topic) — nothing longer than a few
+    words per field — which is the same kind of easy, low-error extraction
+    that already made "keywords" work about as well as baseline. The note
+    is then composed by TEMPLATING these fields together in code, not by
+    asking the LLM to compose the sentence itself.
 
 Both variants make exactly ONE LLM call per chunk, the same order of
 construction-time cost as summary's one-call-per-window (see
@@ -74,22 +89,27 @@ def augment_keywords(chunks: List[MemoryEntry], llm: LLMClient) -> None:
 
 
 def augment_note(chunks: List[MemoryEntry], llm: LLMClient) -> None:
-    """augmentation="note": one LLM call per chunk asking for keywords AND a
-    short context note (what's being discussed, why it matters — the kind
-    of gloss a human might jot in the margin). The note is appended after
-    the raw chunk text, so it becomes part of what gets embedded — this is
-    the variant's whole point (retrieval over raw text + note, not raw text
-    alone). metadata["keywords"] / metadata["note"] keep the pieces
+    """augmentation="note": one LLM call per chunk extracting a handful of
+    SHORT, CONCRETE fields — keywords, timestamp, location, persons,
+    entities, topic — never a free-text summary sentence (that was the
+    earlier, weaker design; see the module docstring). The fields are then
+    templated together in code into a note appended after the raw chunk
+    text, so it becomes part of what gets embedded — this is the variant's
+    whole point (retrieval over raw text + note, not raw text alone).
+    metadata["keywords"] / metadata["persons"] / etc. keep the pieces
     available separately too, for inspection/debugging."""
     for chunk in chunks:
-        prompt = f"""Read this dialogue excerpt and produce two things:
-1. "keywords": 3-8 salient keywords/phrases (names, places, specific nouns, technical terms, numbers, dates).
-2. "context": one or two plain sentences summarizing what's being discussed and why it might matter later — a short margin note, not a restatement of every line.
+        prompt = f"""Extract structured information from this dialogue excerpt. This will be appended after the excerpt itself to help retrieval later, so every field must be SHORT and CONCRETE — a list of terms or a short phrase, never a summary sentence or a restatement of the dialogue.
 
 Dialogue:
 {chunk.lossless_restatement}
 
-Return ONLY a JSON object: {{"keywords": [...], "context": "..."}}"""
+[Requirements — Precise Extraction, not summarization]
+- keywords: 3-8 core keywords/short phrases (names, places, specific nouns, technical terms, numbers, dates)
+- topic: ONE short phrase (a few words, not a sentence) naming what this excerpt is about
+- context: one sentence summary for this chunk
+
+Return ONLY a JSON object: {{"keywords": [...], "topic": "...", "context": "..."}}"""
         try:
             resp = llm.chat_completion([{"role": "user", "content": prompt}], temperature=0.0)
             data = llm.extract_json(resp)
@@ -98,18 +118,36 @@ Return ONLY a JSON object: {{"keywords": [...], "context": "..."}}"""
         except Exception:
             data = {}
 
-        raw_keywords = data.get("keywords", [])
-        keywords = [k.strip() for k in raw_keywords if isinstance(k, str) and k.strip()] if isinstance(raw_keywords, list) else []
-        context = data.get("context", "")
-        context = context.strip() if isinstance(context, str) else ""
+        def _str_list(key: str) -> List[str]:
+            raw = data.get(key, [])
+            if not isinstance(raw, list):
+                return []
+            return [v.strip() for v in raw if isinstance(v, str) and v.strip()]
+
+        def _str_or_none(key: str) -> str:
+            v = data.get(key)
+            return v.strip() if isinstance(v, str) and v.strip() and v.strip().lower() != "null" else ""
+
+        keywords = _str_list("keywords")
+        context = _str_or_none("context")
+        topic = _str_or_none("topic")
 
         chunk.metadata["keywords"] = keywords
-        chunk.metadata["note"] = context
+        chunk.metadata["topic"] = topic
+        chunk.metadata["context"] = context
 
+        # Template the fields together — the LLM never composes this
+        # sentence itself, which is the point (see module docstring).
         note_parts = []
         if keywords:
             note_parts.append("Keywords: " + ", ".join(keywords))
+        if topic:
+            note_parts.append("Topic: " + topic)
         if context:
             note_parts.append("Context: " + context)
-        if note_parts:
-            chunk.lossless_restatement = chunk.lossless_restatement + "\n[Note] " + " | ".join(note_parts)
+
+        note = " | ".join(note_parts)
+        chunk.metadata["note"] = note
+        if note:
+            chunk.lossless_restatement = chunk.lossless_restatement + "\n[Note] " + note
+
