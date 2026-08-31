@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment variables / secrets (important: never commit API keys)
+.env
+*.key
+secrets.yaml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+
+# Data files (if data/ holds downloaded/generated data rather than hand-written code)
+data/*
+!data/.gitkeep
+!data/README.md
+
+# Database files (local sqlite/vector index files, not code)
+database/*.db
+database/*.sqlite
+database/*.faiss
+database/*.index
+!database/*.py
+
+# Experiment results/outputs (generated csv/log/figures — usually too large/numerous for git)
+results/*
+!results/.gitkeep
+
+# Model weights (hundreds of MB to GBs — GitHub's 100MB single-file limit makes these mandatory to ignore)
+models/*.pt
+models/*.pth
+models/*.ckpt
+models/*.safetensors
+models/*.bin
+!models/*.py
+
+# Logs
+*.log
+logs/
+wandb/
+
+# Test
+test.ipynb
