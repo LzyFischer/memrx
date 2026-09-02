@@ -30,7 +30,7 @@ from core.retrieval2a import retrieve
 from core.treatments import build_memory_store
 from eval.locomo_loader import (
     CATEGORY_NAMES, build_dia_id_index, build_qa_prompt, evidence_flat_ids, exact_match,
-    f1_score, load_locomo, sample_to_dialogues,
+    f1_score, load_locomo, sample_to_dialogues, split_locomo,
 )
 from utils.embedding import EmbeddingModel
 from utils.llm_client import LLMClient
@@ -138,6 +138,14 @@ def main():
     p.add_argument("--overlap", type=int, default=OVERLAP_SIZE)
     p.add_argument("--max-conversations", type=int, default=None,
                     help="仅跑前 N 个对话（调试用，先设成 1-2 跑通再去掉）")
+    p.add_argument("--split", choices=["train", "val", "test", "all"], default="all",
+                    help="train=前 n_train 个对话（训练/获取 feedback），"
+                         "val=接下来 n_val 个（validation），"
+                         "test=其余（held-out test），all=不切分（旧行为）")
+    p.add_argument("--n-train", type=int, default=2,
+                    help="--split 用：train 集对话数")
+    p.add_argument("--n-val", type=int, default=1,
+                    help="--split 用：val 集对话数")
     p.add_argument("--conditions", nargs="*", default=None,
                     help="仅跑指定 condition_id（如 summary__hierarchical），默认全部10个")
     p.add_argument("--save-every", type=int, default=20)
@@ -148,8 +156,9 @@ def main():
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    out_csv = os.path.join(args.out_dir, "2a_locomo_results.csv")
-    out_json = os.path.join(args.out_dir, "2a_locomo_results.json")
+    suffix = f"_{args.split}" if args.split != "all" else ""
+    out_csv = os.path.join(args.out_dir, f"2a_locomo_results{suffix}.csv")
+    out_json = os.path.join(args.out_dir, f"2a_locomo_results{suffix}.json")
 
     llm = LLMClient(api_key=args.api_key, model=args.model, base_url=args.base_url,
                      enable_thinking=args.thinking, use_streaming=False)
@@ -158,6 +167,9 @@ def main():
     data = load_locomo(args.data)
     if args.max_conversations:
         data = data[: args.max_conversations]
+    if args.split != "all":
+        data = split_locomo(data, n_train=args.n_train, n_val=args.n_val)[args.split]
+    print(f"[split={args.split}] {len(data)} conversations")
 
     conditions = build_condition_matrix()
     if args.conditions:

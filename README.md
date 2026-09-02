@@ -46,3 +46,16 @@ python eval/run_2a_locomo.py --data data/locomo10.json \
     --model Qwen/Qwen3-1.7B --base-url http://localhost:8000/v1 \
     --out-dir results --max-conversations 1   # 先小样本跑通
 ```
+
+# 1. 拿 train 集(前2个对话)的 7-condition feedback,LearnedRouter 训练用
+python eval/run_2a_locomo.py --data data/locomo10.json --split train --out-dir results
+
+# 2. naive router 在 val(第3个对话)上跑一遍,不需要训练数据
+python eval/run_router_locomo.py --data data/locomo10.json --split val \
+    --router naive --out-dir results --model Qwen/Qwen3-1.7B
+
+# 3. learned router 在 val 上跑一遍,用第1步的CSV拟合
+python eval/run_router_locomo.py \
+    --results-csv results/2a_locomo_results_test.csv \
+    --router learned --train-csv results/2a_locomo_results_train.csv \
+    --out-dir results --model Qwen/Qwen3-1.7B

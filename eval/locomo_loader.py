@@ -156,3 +156,26 @@ def f1_score(prediction: str, ground_truth: str) -> float:
 
 def exact_match(prediction: str, ground_truth: str) -> float:
     return float(normalize_answer(prediction) == normalize_answer(ground_truth))
+
+
+def split_locomo(
+    data: List[Dict[str, Any]], n_train: int = 2, n_val: int = 1,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Split LoCoMo conversations by their order in the source file.
+
+    train = data[:n_train]              (used for training / getting per-
+                                          condition feedback, e.g. to fit
+                                          core/router.py's LearnedRouter)
+    val   = data[n_train : n_train+n_val] (used for validation / model
+                                          selection)
+    test  = data[n_train+n_val :]        (everything else, held out)
+
+    Positional, not random — LoCoMo10 only has 10 conversations, so a
+    deterministic split keeps every run reproducible without needing to
+    persist a seed or an index list.
+    """
+    return {
+        "train": data[:n_train],
+        "val": data[n_train:n_train + n_val],
+        "test": data[n_train + n_val:],
+    }
