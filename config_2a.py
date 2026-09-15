@@ -43,24 +43,40 @@ class Condition:
 
 
 def build_condition_matrix() -> list:
-    conditions = [Condition(condition_id="baseline", dimension="baseline")]
+    """3+1 candidate menu: raw text plus exactly one variant per processing
+    dimension.
 
-    for v in ["session_level", "fine_grained"]:
-        conditions.append(Condition(condition_id=f"summary__{v}", dimension="summary", summary=v))
-
-    for v in ["keywords", "note"]:
-        conditions.append(Condition(condition_id=f"augmentation__{v}", dimension="augmentation", augmentation=v))
-
-    for v in ["semantic", "entity"]:
-        conditions.append(Condition(condition_id=f"graph__{v}", dimension="graph", graph=v))
-
-    return conditions
+    The 2a ablation kept two variants per dimension to ask "which variant of
+    summarization/augmentation/graph is better". That is a different question
+    from the one the router asks, and carrying both variants makes the menu
+    半 redundant: two summary variants compete with each other far more than
+    either competes with graph, so most of the routing signal ends up spent
+    on a within-dimension distinction. One representative per dimension keeps
+    the candidates functionally distinct, which is what a router needs.
+    """
+    return [
+        Condition(condition_id="baseline", dimension="baseline"),
+        Condition(condition_id="summary__session_level", dimension="summary",
+                  summary="session_level"),
+        Condition(condition_id="augmentation__keywords", dimension="augmentation",
+                  augmentation="keywords"),
+        Condition(condition_id="graph__entity", dimension="graph", graph="entity"),
+    ]
+# def build_condition_matrix() -> list:
+#     conditions = [Condition(condition_id="baseline", dimension="baseline")]
+#     for v in ["session_level", "fine_grained"]:
+#         conditions.append(Condition(condition_id=f"summary__{v}", dimension="summary", summary=v))
+#     for v in ["keywords", "note"]:
+#         conditions.append(Condition(condition_id=f"augmentation__{v}", dimension="augmentation", augmentation=v))
+#     for v in ["semantic", "entity"]:
+#         conditions.append(Condition(condition_id=f"graph__{v}", dimension="graph", graph=v))
+#     return conditions
 
 
 # ---------------- 实验运行参数 ----------------
-RETRIEVAL_TOP_K = 10
+RETRIEVAL_TOP_K = 20
 WINDOW_SIZE = 5      # raw chunk / summary window：LoCoMo 单条对话较长，5轮/窗比默认20更适合小样本 ablation
-OVERLAP_SIZE = 0
+OVERLAP_SIZE = 1
 
 DATA_PATH = "data/locomo10.json"
 RESULTS_DIR = "results"
