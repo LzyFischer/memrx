@@ -11,10 +11,10 @@ config.py                 LLM / embedding / window defaults
 core/                     memory views (shared by everything)
   conditions.py           the 3+1 candidate menu + one-line view descriptions
   entry.py                Dialogue, MemoryEntry
-  chunking.py             raw chunks (baseline / augmentation / graph)
-  summary.py              summary=session_level
-  augmentation.py         augmentation=keywords
-  graph.py                graph=entity
+  chunking.py             raw chunks, the shared unit every view processes
+  summary.py              summary: chunk -> one dense LLM restatement
+  augmentation.py         augmentation: raw chunk + entities/events/time/keywords
+  graph.py                graph: chunk entities, entity-match score for ranking
   store.py                MemoryStore: dense + BM25 + graph, pickle cache
   bm25.py
   views.py                build_memory_store / get_store (cached)

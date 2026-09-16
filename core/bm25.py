@@ -1,5 +1,5 @@
 """Minimal Okapi BM25 (no external dependency). Sparse channel for
-augmentation=keywords; see core/retrieval.py."""
+the augmentation view; see core/retrieval.py."""
 import math
 import re
 from collections import Counter

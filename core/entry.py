@@ -8,12 +8,14 @@ from pydantic import BaseModel, Field
 class MemoryEntry(BaseModel):
     """One retrievable memory unit.
 
-    `lossless_restatement` is the only text that is embedded and shown to the
-    reader. `metadata` carries view-specific side info:
+    `lossless_restatement` is the text that is embedded and indexed; the reader
+    sees it too unless metadata["display"] is set. `metadata` carries view-specific side info:
       dia_id_start / dia_id_end   source turn range (all views; used for recall)
-      keywords                    augmentation=keywords, drives the BM25 index
-      entities                    graph=entity
-    Graph edges live in MemoryStore.graph, not here.
+      date                        session date of the chunk
+      display                     augmentation: raw text shown to the reader instead
+      attributes                  augmentation: the generated fields
+      entities                    graph; drives the entity index
+      summary_fallback            summary; True if the LLM output was unusable
     """
 
     entry_id: str = Field(default_factory=lambda: str(uuid.uuid4()))

@@ -22,7 +22,7 @@ from memrx.features import FeatureBuilder, metric_matrix
 from memrx.probe import PROBE_FEATURE_NAMES
 from memrx.router import Router, make_target
 
-VIEWS = ["baseline", "summary__session_level", "augmentation__keywords", "graph__entity"]
+VIEWS = ["baseline", "summary__structured", "augmentation__attributes", "graph__entity"]
 D = 384
 OUT = Path("results_synth")
 
@@ -68,7 +68,9 @@ def test_synthetic():
         with open(OUT / name, "w") as f:
             f.writelines(json.dumps(r) + "\n" for r in recs)
     view_embs = rng.normal(size=(4, D))
-    np.savez(OUT / "view_embs.npz", views=np.array(VIEWS), embs=view_embs)
+    from core.conditions import describe
+    np.savez(OUT / "view_embs.npz", views=np.array(VIEWS), texts=np.array([describe(v) for v in VIEWS]),
+             embs=view_embs)
 
     fb = FeatureBuilder(D)
     router = Router(view_embs, epochs=200).fit(fb(train), metric_matrix(train, VIEWS))

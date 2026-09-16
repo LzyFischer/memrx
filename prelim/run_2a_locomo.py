@@ -21,6 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import numpy as np
+
 import config
 from core.conditions import build_condition_matrix
 from core.qa import answer_question, format_context, gold_answer
@@ -29,7 +31,7 @@ from core.views import get_store
 from utils.embedding import EmbeddingModel
 from utils.llm_client import LLMClient
 from utils.locomo import (
-    CATEGORY_NAMES, build_dia_id_index, evidence_flat_ids, exact_match,
+    CATEGORY_NAMES, bleu1_score, build_dia_id_index, print_type_table, evidence_flat_ids, exact_match,
     f1_score, load_locomo, sample_to_dialogues, split_locomo,
 )
 
@@ -65,6 +67,7 @@ def run_one_qa(llm: LLMClient, store, condition, qa, top_k: int, evidence_ids=No
         "prediction": pred,
         "f1": f1_score(pred, gold),
         "em": exact_match(pred, gold),
+        "bleu1": bleu1_score(pred, gold),
         "n_retrieved": len(retrieved),
         "latency_sec": round(time.time() - t0, 3),
         "evidence_total": len(evidence_ids),
@@ -127,7 +130,7 @@ def main():
     fieldnames = [
         "sample_id", "condition_id", "dimension", "summary", "augmentation", "graph",
         "category", "category_name", "question", "gold", "prediction",
-        "f1", "em", "n_retrieved", "latency_sec", "n_memory_units",
+        "f1", "em", "bleu1", "n_retrieved", "latency_sec", "n_memory_units",
         "evidence_total", "evidence_covered", "retrieval_recall",
     ]
     results = []
@@ -192,36 +195,30 @@ def main():
 
 
 def print_summary(results):
-    """Pivot table: condition_id x category -> mean F1. This is the table
-    you eyeball for heterogeneous treatment effect (does the best condition
-    change across categories?)."""
-    grid = defaultdict(list)
-    conditions_seen, categories_seen = [], []
+    """condition_id x query type -> mean F1 and BLEU-1. This is the table you
+    eyeball for heterogeneous treatment effect (does the best condition change
+    across query types?). Rows from CSVs without a bleu1 column are rescored
+    from prediction/gold."""
+    by_cond = defaultdict(lambda: {"cat": [], "f1": [], "bleu1": []})
     for r in results:
-        cid, cat = r["condition_id"], r.get("category_name", "?")
         try:
             f1 = float(r["f1"])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, KeyError):
             continue
-        grid[(cid, cat)].append(f1)
-        if cid not in conditions_seen:
-            conditions_seen.append(cid)
-        if cat not in categories_seen:
-            categories_seen.append(cat)
+        b1 = r.get("bleu1")
+        try:
+            b1 = float(b1)
+            if b1 != b1:            # NaN from a CSV without the column
+                raise ValueError
+        except (TypeError, ValueError):
+            b1 = bleu1_score(str(r.get("prediction", "")), str(r.get("gold", "")))
+        d = by_cond[r["condition_id"]]
+        d["cat"].append(int(r.get("category", 0)))
+        d["f1"].append(f1)
+        d["bleu1"].append(b1)
 
-    print("\n=== 2a: mean F1 by condition x category ===")
-    header = f"{'condition':<28s}" + "".join(f"{c:>14s}" for c in categories_seen) + f"{'overall':>14s}"
-    print(header)
-    for cid in conditions_seen:
-        row_vals = []
-        all_f1 = []
-        for cat in categories_seen:
-            xs = grid.get((cid, cat), [])
-            row_vals.append(sum(xs) / len(xs) if xs else float("nan"))
-            all_f1.extend(xs)
-        overall = sum(all_f1) / len(all_f1) if all_f1 else float("nan")
-        row_str = f"{cid:<28s}" + "".join(f"{v*100:>13.1f}%" for v in row_vals) + f"{overall*100:>13.1f}%"
-        print(row_str)
+    print_type_table("=== 2a: F1 / BLEU-1 (x100) by condition x query type ===",
+                     [(cid, d["cat"], d) for cid, d in by_cond.items()])
 
 
 if __name__ == "__main__":

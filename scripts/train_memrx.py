@@ -10,8 +10,10 @@ For each split prints:
   random           expected score of picking a view uniformly
   router           the learned router
   oracle           per-question max (upper bound)
-plus how often the router picks each view, and writes one CSV row per
-question (router pick + every view's score) to --out-dir for inspection.
+then the same rows broken down by the four LoCoMo query types (multi_hop,
+temporal, open_domain, single_hop) with both F1 and BLEU-1, plus how often
+the router picks each view. Writes one CSV row per question (router pick +
+every view's F1 and BLEU-1) to --out-dir for inspection.
 
 Ablations are flags rather than extra built-in rows: --no-probe for a
 query-only router, --tau 0 for a hard argmax classifier.
@@ -35,6 +37,7 @@ import numpy as np
 
 from memrx.features import FeatureBuilder, load_jsonl, metric_matrix, view_embeddings
 from memrx.router import Router
+from utils.locomo import print_type_table
 
 
 def tie_stats(Y: np.ndarray) -> str:
@@ -65,15 +68,34 @@ def report(tag, recs, X, Y, views, router, best_fixed, out_dir, metric):
     counts = Counter(pick.tolist())
     print("  router picks: " + ", ".join(f"{views[k]} {counts.get(k, 0)}" for k in range(len(views))))
 
+    # ---- F1 and BLEU-1 by query type -----------------------------------
+    scores = {m: metric_matrix(recs, views, m) for m in ("f1", "bleu1")}
+    idx = np.arange(N)
+
+    def per_q(fn):
+        return {m: fn(S) for m, S in scores.items()}
+
+    type_rows = [(f"fixed {v}", per_q(lambda S, k=k: S[:, k])) for k, v in enumerate(views)]
+    type_rows += [
+        (f"best fixed ({views[best_fixed]})", per_q(lambda S: S[:, best_fixed])),
+        ("random", per_q(lambda S: np.nanmean(S, 1))),
+        ("router", per_q(lambda S: S[idx, pick])),
+        ("oracle (per metric)", per_q(lambda S: np.nanmax(S, 1))),
+    ]
+    cats = [int(r.get("category", 0)) for r in recs]
+    print_type_table(f"  --- {tag}: F1 / BLEU-1 (x100) by query type, router trained on {metric} ---",
+                     [(name, cats, vals) for name, vals in type_rows])
+
     path = Path(out_dir) / f"router_preds_{tag}.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["sample_id", "question", "category", "pick", f"router_{metric}", f"oracle_{metric}"]
-                   + [f"{metric}:{v}" for v in views])
+        w.writerow(["sample_id", "question", "category", "pick", "router_f1", "router_bleu1",
+                    "oracle_f1"] + [f"f1:{v}" for v in views] + [f"bleu1:{v}" for v in views])
         for i, r in enumerate(recs):
             w.writerow([r["sample_id"], r["question"], r.get("category"), views[pick[i]],
-                        got[i], np.nanmax(Y[i])] + list(Y[i]))
+                        scores["f1"][i, pick[i]], scores["bleu1"][i, pick[i]], np.nanmax(scores["f1"][i])]
+                       + list(scores["f1"][i]) + list(scores["bleu1"][i]))
     print(f"  -> {path}")
 
 
@@ -82,7 +104,8 @@ def main():
     p.add_argument("--train", required=True)
     p.add_argument("--val", required=True)
     p.add_argument("--test", default=None)
-    p.add_argument("--metric", default="f1", choices=["f1", "em"])
+    p.add_argument("--metric", default="f1", choices=["f1", "em", "bleu1"],
+                   help="what the router is trained on; the report always shows F1 and BLEU-1")
     p.add_argument("--tau", type=float, default=0.1, help="target temperature; 0 = hard argmax")
     p.add_argument("--margin", type=float, nargs="+", default=[0.0],
                    help="F1 gap below which two views count as a tie; several values = sweep")

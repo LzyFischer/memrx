@@ -1,8 +1,8 @@
 """View-aware retrieval: retrieve(store, query, condition, top_k).
 
   baseline / summary      top-k cosine
-  augmentation=keywords   dense + BM25(keywords), fused with weighted RRF (0.7 / 0.3)
-  graph=entity            top_k//2 cosine seeds, then 1-hop neighbours
+  augmentation            dense + BM25 over raw+attributes text, weighted RRF (0.7 / 0.3)
+  graph                   alpha * dense + (1 - alpha) * entity-match score, one ranked top-k
 """
 from typing import Dict, List, Optional
 
@@ -15,7 +15,7 @@ def retrieve(store: MemoryStore, query: str, condition: Condition, top_k: int = 
     if condition.dimension == "augmentation":
         return _retrieve_keywords_hybrid(store, query, top_k)
     if condition.dimension == "graph":
-        return _retrieve_graph(store, query, top_k, hops=1)
+        return _retrieve_graph(store, query, top_k)
     return store.semantic_search(query, top_k=top_k)
 
 
@@ -39,17 +39,16 @@ def _retrieve_keywords_hybrid(store: MemoryStore, query: str, top_k: int) -> Lis
     return [e for e in (store.get(i) for i in fused[:top_k]) if e is not None]
 
 
-def _retrieve_graph(store: MemoryStore, query: str, top_k: int, hops: int) -> List[MemoryEntry]:
-    seeds = store.semantic_search(query, top_k=max(1, top_k // 2))
-    out, seen = list(seeds), {e.entry_id for e in seeds}
-    for s in seeds:
-        for nid in store.neighbors(s.entry_id, hops=hops):
-            if len(out) >= top_k:
-                break
-            ent = store.get(nid)
-            if nid not in seen and ent is not None:
-                out.append(ent)
-                seen.add(nid)
-        if len(out) >= top_k:
-            break
-    return out[:top_k]
+def _retrieve_graph(store: MemoryStore, query: str, top_k: int, alpha: float = 0.7) -> List[MemoryEntry]:
+    """Mem0-style: the entity graph is a ranking signal, not a neighbour dump."""
+    ents, dense = store.semantic_search_scored(query, top_k=len(store))
+    ent_scores = store.entity_index().scores(query)
+    if not ents or not ent_scores:
+        return ents[:top_k]                                   # no query entity: pure dense
+    lo, hi = min(dense), max(dense)
+    g_max = max(ent_scores.values())
+    ranked = sorted(
+        zip(ents, dense),
+        key=lambda ed: -(alpha * (ed[1] - lo) / (hi - lo + 1e-9)
+                         + (1 - alpha) * ent_scores.get(ed[0].entry_id, 0.0) / g_max))
+    return [e for e, _ in ranked[:top_k]]

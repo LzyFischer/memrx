@@ -16,9 +16,20 @@ def load_jsonl(path: str) -> List[dict]:
 
 
 def metric_matrix(recs: List[dict], views: List[str], metric: str = "f1") -> np.ndarray:
-    """(N, K) scores, NaN where a view is missing."""
-    return np.array([[np.nan if r[metric].get(v) is None else float(r[metric][v]) for v in views]
-                     for r in recs])
+    """(N, K) scores, NaN where a view is missing. BLEU-1 is recomputed from the
+    stored predictions when a record predates the "bleu1" field."""
+    from utils.locomo import bleu1_score
+
+    def value(r, v):
+        if metric in r:
+            x = r[metric].get(v)
+        elif metric == "bleu1" and v in r.get("pred", {}):
+            x = bleu1_score(r["pred"][v], r["gold"])
+        else:
+            x = None
+        return np.nan if x is None else float(x)
+
+    return np.array([[value(r, v) for v in views] for r in recs])
 
 
 class FeatureBuilder:
@@ -47,15 +58,18 @@ class FeatureBuilder:
 
 def view_embeddings(views: List[str], cache: Optional[str] = None) -> np.ndarray:
     """Embed each view's one-line description (core/conditions.py). Cached to .npz."""
+    from core.conditions import describe
+
+    texts = [describe(v) for v in views]
     if cache and Path(cache).exists():
         blob = np.load(cache, allow_pickle=True)
-        if list(blob["views"]) == list(views):
+        # keyed on the description text too, so editing a description re-embeds
+        if list(blob["views"]) == list(views) and "texts" in blob and list(blob["texts"]) == texts:
             return blob["embs"]
-    from core.conditions import describe
     from utils.embedding import EmbeddingModel
 
-    embs = np.asarray(EmbeddingModel().encode([describe(v) for v in views]), dtype=np.float32)
+    embs = np.asarray(EmbeddingModel().encode(texts), dtype=np.float32)
     if cache:
         Path(cache).parent.mkdir(parents=True, exist_ok=True)
-        np.savez(cache, views=np.array(views), embs=embs)
+        np.savez(cache, views=np.array(views), texts=np.array(texts), embs=embs)
     return embs

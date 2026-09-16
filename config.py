@@ -16,6 +16,7 @@ EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 WINDOW_SIZE = 5          # turns per raw chunk / summary window
 OVERLAP_SIZE = 1
 RETRIEVAL_TOP_K = 20
+LLM_WORKERS = 8          # concurrent per-chunk LLM calls when building a view
 
 # ── Data ───────────────────────────────────────────────────────────────
 DATA_PATH = "data/locomo10.json"

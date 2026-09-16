@@ -44,7 +44,7 @@ from memrx.probe import compute_probe_features, probe_retrieve
 from utils.embedding import EmbeddingModel
 from utils.llm_client import LLMClient
 from utils.locomo import (
-    build_dia_id_index, evidence_flat_ids, exact_match, f1_score,
+    bleu1_score, build_dia_id_index, evidence_flat_ids, exact_match, f1_score,
     load_locomo, sample_to_dialogues, split_locomo,
 )
 
@@ -163,6 +163,7 @@ def main():
                 "pred": preds,
                 "f1": {v: _r(f1_score(preds[v], gold), 4) for v in views},
                 "em": {v: _r(exact_match(preds[v], gold), 4) for v in views},
+                "bleu1": {v: _r(bleu1_score(preds[v], gold), 4) for v in views},
                 "n_retrieved": n_retrieved,
             }
             out_f.write(json.dumps(rec, ensure_ascii=False) + "\n")

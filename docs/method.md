@@ -4,14 +4,16 @@
 
 ## 候选集：3+1
 
-`core/conditions.py::build_condition_matrix`
+`core/conditions.py::build_condition_matrix`。所有 view 都从同一批 raw chunk（`--window-size` 轮一段）出发，每个 chunk 一次 LLM 调用，view 的单元数与 baseline 相同。
 
-| view | 构建期 LLM 调用 |
-|---|---|
-| `baseline` | 0 |
-| `summary__session_level` | 每窗口 1 次 |
-| `augmentation__keywords` | 每 chunk 1 次 |
-| `graph__entity` | 每 chunk 1 次 |
+| view | 处理 | 检索 | 参考 |
+|---|---|---|---|
+| `baseline` | 无 | dense top-k | — |
+| `summary__structured` | chunk → C(chunk)：LLM 把 chunk 压缩成**一条**稠密的 lossless_restatement（全名、绝对时间），不保留原文 | dense top-k | — |
+| `augmentation__attributes` | chunk → chunk + A(chunk)：原文不动，追加 Entities/Events/Time/Keywords；embedding 和 BM25 用原文+属性，**reader 只看原文**（`metadata["display"]`） | dense 与 BM25 做 RRF，0.7/0.3 | MemInsight |
+| `graph__entity` | chunk → G(chunk)：抽 entity，chunk 通过共享 entity 相连 | `0.7·minmax(dense) + 0.3·S_g/max S_g`，`S_g = Σ_{e∈E_q∩E_m} idf(e)`，统一排序取 top-k | Mem0 graph memory |
+
+graph 的 query entity 用 store 里已有的 entity 词表在 query 中做整词匹配，不额外调 LLM；query 不含任何已知 entity 时退化为 dense。summary 的 LLM 输出解析失败 3 次时回退为原文，数量记在构建日志和 `metadata["summary_fallback"]`。
 
 ## 数据流
 

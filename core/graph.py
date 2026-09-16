@@ -1,19 +1,29 @@
-"""graph=entity: an LLM extracts named entities per raw chunk; two chunks get
-an edge if they share an entity. Node text is the same raw chunk as baseline.
+"""graph: chunk -> G(chunk)   (Mem0-style entity-linked memory)
 
-The most frequent entities (e.g. a speaker's own name) are excluded from
-edge-building: otherwise they connect almost every pair of chunks and 1-hop
-expansion returns most of the store. Edges are binary, so this hard-excludes
-rather than down-weights (the graph analogue of BM25's IDF).
+Build: an LLM extracts the named entities of each raw chunk into
+metadata["entities"]. Chunks that mention the same entity are linked through
+that entity node (memory - entity - memory); the raw text is unchanged.
+
+Retrieve (core/retrieval.py): entities of the store that occur in the query
+give each chunk an entity score, which is mixed with the dense score:
+
+    S_g(q, m) = sum_{e in E_q ∩ E_m} idf(e)
+    S(q, m)   = alpha * minmax(S_dense) + (1 - alpha) * S_g / max S_g
+
+idf down-weights entities that appear everywhere (e.g. the two speakers), so
+no hard frequency cut-off is needed. A query that mentions no known entity is
+ranked by dense similarity alone.
 """
 import math
-from itertools import combinations
+import re
 from typing import Dict, List
 
+import config
+from core.chunking import map_chunks
 from core.entry import MemoryEntry
-from core.store import MemoryStore
 from utils.llm_client import LLMClient, coerce_json_list
 
+# Unchanged from the previous graph view, so stores cached from it still load.
 _PROMPT = """Extract all named entities (people, places, organizations, specific objects/events) from this dialogue excerpt.
 
 Dialogue:
@@ -29,36 +39,39 @@ def _extract_entities(llm: LLMClient, text: str) -> List[str]:
         entities = coerce_json_list(llm.extract_json(resp), context="entity extraction")
     except Exception:
         entities = []
-    return [str(e).strip().lower() for e in entities if str(e).strip()]
+    return sorted({str(e).strip().lower() for e in entities if str(e).strip()})
 
 
-def _high_frequency_entities(index: Dict[str, List[str]], top_frac: float, min_entities: int) -> set:
-    """Top `top_frac` of entities by chunk count; skipped when there are too
-    few distinct entities for that cut to mean anything."""
-    if len(index) < min_entities:
-        return set()
-    n_exclude = max(1, math.ceil(len(index) * top_frac))
-    ranked = sorted(index.items(), key=lambda kv: -len(kv[1]))
-    return {name for name, _ in ranked[:n_exclude]}
+def extract_chunk_entities(chunks: List[MemoryEntry], llm: LLMClient) -> None:
+    for chunk, ents in zip(chunks, map_chunks(lambda c: _extract_entities(llm, c.lossless_restatement),
+                                              chunks, config.LLM_WORKERS)):
+        chunk.metadata["entities"] = ents
+    n_ent = len({e for c in chunks for e in c.metadata["entities"]})
+    print(f"  [graph] {len(chunks)} chunks, {n_ent} distinct entities")
 
 
-def build_entity_graph(store: MemoryStore, chunks: List[MemoryEntry], llm: LLMClient,
-                       top_frequency_percentile: float = 0.01,
-                       min_entities_for_filtering: int = 20) -> None:
-    index: Dict[str, List[str]] = {}
-    for chunk in chunks:
-        entities = _extract_entities(llm, chunk.lossless_restatement)
-        chunk.metadata["entities"] = entities
-        for e in entities:
-            index.setdefault(e, []).append(chunk.entry_id)
+class EntityIndex:
+    """entity -> chunk ids, with idf, and query-side entity matching."""
 
-    excluded = _high_frequency_entities(index, top_frequency_percentile, min_entities_for_filtering)
-    if excluded:
-        top = sorted(excluded, key=lambda e: -len(index[e]))[:5]
-        print(f"  [graph=entity] excluding {len(excluded)} high-frequency entities: {top}")
+    def __init__(self, entries: Dict[str, MemoryEntry]):
+        self.chunks_of: Dict[str, List[str]] = {}
+        for eid, e in entries.items():
+            for ent in e.metadata.get("entities", []):
+                self.chunks_of.setdefault(ent, []).append(eid)
+        n = max(1, len(entries))
+        self.idf = {ent: math.log(1 + (n - len(ids) + 0.5) / (len(ids) + 0.5))
+                    for ent, ids in self.chunks_of.items()}
+        self._patterns = {ent: re.compile(r"(?<!\w)" + re.escape(ent) + r"(?!\w)")
+                          for ent in self.chunks_of if len(ent) >= 2}
 
-    for name, ids in index.items():
-        if name in excluded or len(ids) < 2:
-            continue
-        for a, b in combinations(set(ids), 2):
-            store.add_edge(a, b)
+    def query_entities(self, query: str) -> List[str]:
+        q = query.lower()
+        return [ent for ent, pat in self._patterns.items() if pat.search(q)]
+
+    def scores(self, query: str) -> Dict[str, float]:
+        """chunk id -> S_g(q, chunk); only chunks sharing an entity with the query."""
+        out: Dict[str, float] = {}
+        for ent in self.query_entities(query):
+            for eid in self.chunks_of[ent]:
+                out[eid] = out.get(eid, 0.0) + self.idf[ent]
+        return out

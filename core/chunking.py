@@ -1,10 +1,12 @@
-"""Raw chunking: the shared base unit for baseline / augmentation / graph.
+"""Raw chunking: the shared base unit for every view.
 
-Only the summary view rewrites text with an LLM. Augmentation only adds
-metadata to a raw chunk and graph only adds edges between raw chunks, so each
-view's difference from baseline is exactly its own treatment.
+All three processing views work on exactly these chunks, one LLM call per chunk:
+  summary       chunk -> C(chunk)          (raw text replaced by a structured summary)
+  augmentation  chunk -> chunk + A(chunk)  (raw text kept, attributes appended)
+  graph         chunk -> G(chunk)          (raw text kept, entities indexed)
 """
-from typing import List
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, List, TypeVar
 
 from core.entry import Dialogue, MemoryEntry
 
@@ -25,3 +27,14 @@ def build_raw_chunks(dialogues: List[Dialogue], window_size: int = 5,
             },
         ))
     return chunks
+
+
+T = TypeVar("T")
+
+
+def map_chunks(fn: Callable[[MemoryEntry], T], chunks: List[MemoryEntry], workers: int = 8) -> List[T]:
+    """fn over chunks with a thread pool (vLLM batches concurrent requests); order preserved."""
+    if workers <= 1:
+        return [fn(c) for c in chunks]
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(fn, chunks))

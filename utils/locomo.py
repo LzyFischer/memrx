@@ -7,9 +7,12 @@ Get the data file from:
 """
 import collections
 import json
+import math
 import re
 import string
 from typing import Any, Dict, List, Tuple
+
+import numpy as np
 
 from core.entry import Dialogue
 
@@ -144,6 +147,51 @@ def f1_score(prediction: str, ground_truth: str) -> float:
     precision = num_same / len(pred_tokens)
     recall = num_same / len(gt_tokens)
     return 2 * precision * recall / (precision + recall)
+
+
+def bleu1_score(prediction: str, ground_truth: str) -> float:
+    """Sentence BLEU-1: clipped unigram precision x brevity penalty, on the same
+    normalised tokens as f1_score (lowercase, no punctuation or articles)."""
+    pred_tokens = normalize_answer(prediction).split()
+    gt_tokens = normalize_answer(ground_truth).split()
+    if not pred_tokens or not gt_tokens:
+        return float(pred_tokens == gt_tokens)
+    matches = sum((collections.Counter(pred_tokens) & collections.Counter(gt_tokens)).values())
+    precision = matches / len(pred_tokens)
+    bp = 1.0 if len(pred_tokens) > len(gt_tokens) else math.exp(1 - len(gt_tokens) / len(pred_tokens))
+    return bp * precision
+
+
+QUERY_TYPES = [1, 2, 3, 4]   # the four reported LoCoMo types; 5 (adversarial) is left out
+
+
+def print_type_table(title: str, rows) -> None:
+    """rows: [(name, categories, {"f1": scores, "bleu1": scores})], one score per question.
+    Prints mean F1 and BLEU-1 (x100) for each of the four query types and over types 1-4.
+    The n= line counts the first row's questions."""
+    name_w = max(28, max(len(r[0]) for r in rows) + 2)
+    headers = [CATEGORY_NAMES[c] for c in QUERY_TYPES] + ["all 1-4"]
+
+    def masks(cats):
+        cats = np.asarray(cats)
+        return [cats == c for c in QUERY_TYPES] + [np.isin(cats, QUERY_TYPES)]
+
+    first = np.asarray(rows[0][1])
+    print(f"\n{title}")
+    print(" " * name_w + "".join(f"{h:>16s}" for h in headers))
+    print(" " * name_w + "".join(f"{f'(n={int(m.sum())})':>16s}" for m in masks(first)))
+    print(" " * name_w + "".join(f"{'F1':>8s}{'B1':>8s}" for _ in headers))
+    for name, cats, vals in rows:
+        cells = []
+        for m in masks(cats):
+            for key in ("f1", "bleu1"):
+                x = np.asarray(vals[key], dtype=float)[m]
+                x = x[np.isfinite(x)]
+                cells.append(f"{100 * x.mean():>8.1f}" if len(x) else f"{'-':>8s}")
+        print(f"{name:<{name_w}s}" + "".join(cells))
+    n5 = int((first == 5).sum())
+    if n5:
+        print(f"  ({n5} adversarial questions not in this table)")
 
 
 def exact_match(prediction: str, ground_truth: str) -> float:

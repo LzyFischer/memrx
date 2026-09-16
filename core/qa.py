@@ -12,7 +12,7 @@ MAX_CONTEXT_CHARS = 6000
 def format_context(entries: List[MemoryEntry], max_chars: int = MAX_CONTEXT_CHARS) -> str:
     parts, total = [], 0
     for i, e in enumerate(entries, 1):
-        line = f"[{i}] {e.lossless_restatement}"
+        line = f"[{i}] {e.metadata.get('display') or e.lossless_restatement}"
         total += len(line)
         if total > max_chars:
             break
