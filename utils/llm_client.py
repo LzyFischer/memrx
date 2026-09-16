@@ -211,62 +211,6 @@ class LLMClient:
         return "".join(content_chunks), "".join(reasoning_chunks)
 
     # ------------------------------------------------------------------
-    # Gold-answer likelihood (MemRx: the uncensored supervision signal)
-    # ------------------------------------------------------------------
-
-    def gold_answer_logprob(
-        self, prefix: str, answer: str, max_retries: int = 3,
-    ) -> Optional[float]:
-        """Mean per-token log P(answer | prefix), or None if unavailable.
-
-        Uses the /v1/completions endpoint with echo=True and max_tokens=0, so
-        nothing is generated — the server returns the log-probabilities it
-        assigned to the prompt it was handed, and we keep the slice belonging
-        to `answer`. That makes this roughly an order of magnitude cheaper
-        than the generation it supplements.
-
-        Two things to be aware of when reading the numbers:
-
-        * The prompt here is plain text, not the chat template used for
-          generation, so this is not "the probability the QA pipeline would
-          have produced the gold answer". It is only ever compared WITHIN a
-          query — same prefix shape, same answer, only the retrieved context
-          differs — and the PL objective consumes nothing but that
-          within-group ordering, so the offset the format introduces cancels.
-        * Normalising by token count matters: without it the score is
-          dominated by answer length, and since the answer is shared across a
-          group that would be a constant... but the token count can still
-          differ slightly if the context changes tokenisation at the seam.
-          Dividing keeps it stable.
-
-        Returns None when the server does not support echo/logprobs, so the
-        caller can fall back to F1-only supervision for that cell rather than
-        crashing a long curation run.
-        """
-        prompt = prefix + answer
-        start = len(prefix)
-        for attempt in range(max_retries):
-            try:
-                resp = self.client.completions.create(
-                    model=self.model, prompt=prompt, max_tokens=0,
-                    echo=True, logprobs=0, temperature=0.0,
-                )
-                lp = resp.choices[0].logprobs
-                offsets = list(lp.text_offset or [])
-                tlps = list(lp.token_logprobs or [])
-                vals = [v for off, v in zip(offsets, tlps)
-                        if v is not None and off >= start]
-                if not vals:
-                    return None
-                return float(sum(vals) / len(vals))
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    print(f"[warn] gold_answer_logprob unavailable: {e}")
-                    return None
-                time.sleep(2 ** attempt)
-        return None
-
-    # ------------------------------------------------------------------
     # JSON extraction
     # ------------------------------------------------------------------
 

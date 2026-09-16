@@ -16,8 +16,7 @@ All share `.predict(question, category=None, sample_id=None) -> Condition`:
   OracleRouter    per-question argmax over the CSV it is scored on. Not a
                   router — the headroom ceiling.
 
-The learned routers live in memrx/ (PL router; tau=0 with F1-only targets is
-the argmax classifier) and are evaluated by scripts/train_memrx.py.
+The learned router is memrx/router.py, evaluated by scripts/train_memrx.py.
 """
 from __future__ import annotations
 

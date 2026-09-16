@@ -2,10 +2,7 @@
 
 Query-level routing over memory processing pipelines. Each conversation is stored under several views (raw / summary / keyword augmentation / entity graph), and a router picks one view per question.
 
-Two components (details in [`docs/method.md`](docs/method.md)):
-
-1. **probe-then-route**: one cheap retrieval on the raw view gives the router the shape of the evidence distribution
-2. **mixed-likelihood listwise supervision**: end-to-end F1 ties on most questions, so gold-answer likelihood supplies the ordering where F1 has none
+The router conditions on the question plus a cheap probe retrieval on the raw view, and is trained listwise on per-view F1. Details: [`docs/method.md`](docs/method.md).
 
 ## Layout
 
@@ -25,11 +22,11 @@ core/                     memory views (shared by everything)
   qa.py                   context formatting, answer generation
 memrx/                    the method
   probe.py                probe features
-  pl_router.py            Plackett-Luce router + mixed target
+  features.py             JSONL -> X (N, d), F1 matrix (N, K), view embeddings
+  router.py               listwise router (PyTorch MLP, softmax(F1/tau) target)
 scripts/                  MemRx pipeline
-  curate_memrx.py         stage 1: per-question JSONL (probe, F1/EM, likelihood per view)
-  train_memrx.py          stage 2: fit router, report baselines + ablations
-  diagnose_memrx.py       routing collapse / headroom / tie decomposition / LL sanity
+  curate_memrx.py         stage 1: per-question JSONL (probe, prediction + F1/EM per view)
+  train_memrx.py          stage 2: fit router, report vs fixed/random/oracle, per-question CSV
 prelim/                   motivation experiments, see docs/prelim.md
   run_2a_locomo.py        full view x question matrix -> CSV
   analysis.py             win/tie/loss, per-type heatmap, retrieval vs answer phase
@@ -37,7 +34,7 @@ prelim/                   motivation experiments, see docs/prelim.md
   run_router_baselines.py
   win_tie_lose.py
 utils/
-  llm_client.py           OpenAI-compatible client, Qwen3 thinking strip, JSON repair, gold logprob
+  llm_client.py           OpenAI-compatible client, Qwen3 thinking strip, JSON repair
   embedding.py
   locomo.py               LoCoMo loading, QA prompt, F1/EM, split
 tests/smoke_test.py       no GPU / no server needed
@@ -53,21 +50,19 @@ pip install -r requirements.txt
 # 0. sanity check, no vLLM or embedding download needed
 python tests/smoke_test.py
 python scripts/train_memrx.py --train results_synth/memrx_train.jsonl \
-    --val results_synth/memrx_val.jsonl --view-emb-cache results_synth/view_embs.npz
+    --val results_synth/memrx_val.jsonl --view-emb-cache results_synth/view_embs.npz --out-dir results_synth
 
 # 1. curate (train = first 2 conversations, val = 3rd, test = rest)
 vllm serve Qwen/Qwen3-1.7B --host 0.0.0.0 --port 8000 --max-model-len 16384
 python scripts/curate_memrx.py --split train --out results/memrx_train.jsonl
 python scripts/curate_memrx.py --split val   --out results/memrx_val.jsonl
-python scripts/curate_memrx.py --split test  --out results/memrx_test.jsonl
 
-# 2. train + report
-python scripts/train_memrx.py --train results/memrx_train.jsonl \
-    --val results/memrx_val.jsonl --test results/memrx_test.jsonl \
-    --tau-sweep 0.0 0.1 1.0 --out results/memrx_report.json
+# 2. train + report (also writes results/router_preds_{train,val}.csv)
+python scripts/train_memrx.py --train results/memrx_train.jsonl --val results/memrx_val.jsonl
 
-# 3. diagnostics
-python scripts/diagnose_memrx.py --train results/memrx_train.jsonl --val results/memrx_val.jsonl
+# ablations are flags
+python scripts/train_memrx.py ... --no-probe      # query embedding only
+python scripts/train_memrx.py ... --tau 0         # hard argmax classifier
 ```
 
 Memory stores are cached in `results/store_cache/`, keyed by `(sample_id, view, window, overlap)` and shared between `scripts/curate_memrx.py` and `prelim/run_2a_locomo.py`, so the LLM extraction is paid once per conversation.

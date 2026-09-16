@@ -17,7 +17,7 @@ Everything is computed from artefacts the probe retrieval already produced —
 the scores, and the embeddings that were matched against — so the cost on top
 of one embedding search is a few numpy ops on an n x d matrix with n ~ 10.
 
-Groups (the unit of the feature ablation):
+Features, grouped by what they measure:
   conf : margin_norm, decay_norm        how peaked the score distribution is
   disp : n_eff_frac, redundancy         how spread out / duplicated the hits are
   sem  : cos_q_ctx                      semantic distance query <-> retrieved mass
@@ -124,17 +124,9 @@ def compute_probe_features(
     return feats, pooled.astype(np.float32)
 
 
-def probe_vector(feats: Dict[str, float], drop_groups: Sequence[str] = ()) -> np.ndarray:
-    """Dict -> fixed-order vector, optionally zeroing whole groups.
-
-    Zeroed rather than removed so the input width stays constant and a model
-    fitted with every group can be scored with one dropped.
-    """
-    dropped = set()
-    for g in drop_groups:
-        dropped |= set(PROBE_FEATURE_GROUPS.get(g, []))
-    return np.array([0.0 if n in dropped else float(feats.get(n, 0.0))
-                     for n in PROBE_FEATURE_NAMES], dtype=np.float32)
+def probe_vector(feats: Dict[str, float]) -> np.ndarray:
+    """Dict -> vector in PROBE_FEATURE_NAMES order."""
+    return np.array([float(feats.get(n, 0.0)) for n in PROBE_FEATURE_NAMES], dtype=np.float32)
 
 
 def probe_retrieve(store, query: str, top_n: int = 10):

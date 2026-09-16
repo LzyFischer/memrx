@@ -43,7 +43,7 @@ python prelim/run_router_baselines.py --results-csv results/2a_locomo_results_va
     --routers random judge oracle --out-dir results --wtl-by-category
 ```
 
-`--judge-use-category` 会把 gold 类别喂给 judge，只能当诊断。学习型 router（包括 argmax 分类器，即 `tau=0` + F1-only）在 `scripts/train_memrx.py` 里评估。
+`--judge-use-category` 会把 gold 类别喂给 judge，只能当诊断。学习型 router 在 `scripts/train_memrx.py` 里评估（`--tau 0` 即 argmax 分类器）。
 
 ### W/T/L 表怎么读
 

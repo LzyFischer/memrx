@@ -5,13 +5,11 @@ One JSONL record per question holding everything the router needs, so every
 router, ablation and oracle downstream is a table lookup instead of another
 pass over the LLM:
 
-  probe features + query embedding   router input
-  f1[view], em[view]                 the censored end-to-end signal
-  ll[view]                           mean log P(gold | q, ctx_view), the
-                                     uncensored one
+  q_emb, probe, probe_ctx_emb   router input
+  f1[view], em[view]            router supervision
 
-Each view is retrieved from and read from on its own; the additions on top of
-plain per-view QA are the probe pass and the likelihood pass.
+Each view is retrieved from and read from on its own; the only addition on
+top of plain per-view QA is the probe pass on the raw view.
 
     vllm serve Qwen/Qwen3-1.7B --host 0.0.0.0 --port 8000 --max-model-len 16384
 
@@ -19,7 +17,7 @@ plain per-view QA are the probe pass and the likelihood pass.
     python scripts/curate_memrx.py --split val   --out results/memrx_val.jsonl
     python scripts/curate_memrx.py --split test  --out results/memrx_test.jsonl
 
-Cost per question: K generations plus K scoring calls that generate nothing.
+Cost per question: K generations.
 Resumable by (sample_id, question); memory stores are cached under
 --cache-dir so a resumed run does not re-pay the LLM extraction.
 """
@@ -59,19 +57,6 @@ def _r(v, nd=5):
     return round(float(v), nd)
 
 
-def scoring_prefix(context: str, question: str) -> str:
-    """Plain-text prefix for the likelihood pass.
-
-    Deliberately not the JSON {reasoning, answer} prompt used for generation:
-    we are scoring the gold answer string itself, and wrapping it in JSON
-    would put most of the measured tokens on punctuation. Only compared
-    within a query, so the format offset cancels.
-    """
-    return (f"Context:\n{context}\n\n"
-            f"Answer the question using only the context above.\n"
-            f"Question: {question}\nAnswer: ")
-
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data", default=config.DATA_PATH)
@@ -89,8 +74,6 @@ def main():
     p.add_argument("--overlap", type=int, default=config.OVERLAP_SIZE)
     p.add_argument("--max-questions", type=int, default=None)
     p.add_argument("--workers", type=int, default=8)
-    p.add_argument("--no-likelihood", action="store_true",
-                   help="skip the scoring pass (F1-only supervision)")
     p.add_argument("--thinking", action="store_true")
     args = p.parse_args()
 
@@ -170,15 +153,6 @@ def main():
                     lambda v: answer_question(llm, contexts[v], question, category), views)))
             n_gen += len(views)
 
-            # ---- likelihood ------------------------------------------
-            if args.no_likelihood:
-                lls = {v: None for v in views}
-            else:
-                with ThreadPoolExecutor(max_workers=args.workers) as ex:
-                    lls = dict(zip(views, ex.map(
-                        lambda v: llm.gold_answer_logprob(
-                            scoring_prefix(contexts[v], question), gold), views)))
-
             rec = {
                 "sample_id": sample_id, "question": question, "category": category,
                 "gold": gold, "n_evidence": len(evidence_flat_ids(qa, dia_index)),
@@ -186,9 +160,9 @@ def main():
                 "q_emb": _r(q_emb),
                 "probe": {k: _r(v) for k, v in feats.items()},
                 "probe_ctx_emb": _r(ctx_emb),
+                "pred": preds,
                 "f1": {v: _r(f1_score(preds[v], gold), 4) for v in views},
                 "em": {v: _r(exact_match(preds[v], gold), 4) for v in views},
-                "ll": {v: (None if lls[v] is None else _r(lls[v], 5)) for v in views},
                 "n_retrieved": n_retrieved,
             }
             out_f.write(json.dumps(rec, ensure_ascii=False) + "\n")

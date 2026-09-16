@@ -1,118 +1,80 @@
 """
-Stage 2 — fit the MemRx router on train, score it on val (and test).
+Stage 2 — fit the router on train, report on train / val / test.
 
     python scripts/train_memrx.py --train results/memrx_train.jsonl \
-                               --val   results/memrx_val.jsonl \
-                               --test  results/memrx_test.jsonl
+                                  --val   results/memrx_val.jsonl
 
-Reported:
+For each split prints:
+  fixed <view>     every question uses that one view
+  best fixed       the view with the best TRAIN mean, applied to this split
+  random           expected score of picking a view uniformly
+  router           the learned router
+  oracle           per-question max (upper bound)
+plus how often the router picks each view, and writes one CSV row per
+question (router pick + every view's score) to --out-dir for inspection.
 
-  fixed <view>        each processing pipeline used on its own — the incumbents
-  best fixed          the best of those, CHOSEN ON TRAIN (choosing it on the
-                      split being reported would be a second oracle)
-  random              uniform over views, averaged over seeds
-  MemRx               probe input + mixed listwise supervision
-  oracle              per-question max
+Ablations are flags rather than extra built-in rows: --no-probe for a
+query-only router, --tau 0 for a hard argmax classifier.
 
-plus the two ablations that isolate the two components: dropping the probe
-from the input (query-only), and dropping the likelihood from the target
-(alpha forced to 1, i.e. F1-only). tau=0 with F1-only is the argmax
-classifier, which the same code path produces.
+--margin eps treats views within eps F1 of the question's best as equally good.
+Several values run a sweep and print one compact table instead:
+
+    python scripts/train_memrx.py ... --tau 0 --margin 0 0.02 0.05 0.1
 """
 from __future__ import annotations
 
 import argparse
-import json
+import csv
 import sys
+from collections import Counter
 from pathlib import Path
-from typing import List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 
-from memrx.pl_router import PLRouter, RandomProjector
-from memrx.probe import PROBE_FEATURE_GROUPS, probe_vector
+from memrx.features import FeatureBuilder, load_jsonl, metric_matrix, view_embeddings
+from memrx.router import Router
 
 
-def load_jsonl(path):
-    out = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                out.append(json.loads(line))
-    return out
+def tie_stats(Y: np.ndarray) -> str:
+    spread = np.nanmax(Y, 1) - np.nanmin(Y, 1)
+    tie = spread < 1e-9
+    all_hi = tie & (np.nanmin(Y, 1) > 0.99)
+    all_lo = tie & (np.nanmax(Y, 1) < 1e-9)
+    return (f"ties {tie.mean():.1%} (all-correct {all_hi.mean():.1%}, all-wrong {all_lo.mean():.1%}, "
+            f"other {(tie & ~all_hi & ~all_lo).mean():.1%}), informative {(~tie).mean():.1%}")
 
 
-def view_embeddings(views: List[str], cache: Optional[str] = None):
-    """Encode each view's one-line behavioural description.
+def report(tag, recs, X, Y, views, router, best_fixed, out_dir, metric):
+    N = len(recs)
+    mask = np.isfinite(Y)
+    pick = router.predict(X, mask)
+    got = Y[np.arange(N), pick]
 
-    Conditioning on the description rather than on a per-view free parameter
-    is what lets a view that was not in training still be scored.
-    """
-    if cache and Path(cache).exists():
-        blob = np.load(cache, allow_pickle=True)
-        if list(blob["views"]) == list(views):
-            return blob["embs"]
-    from core.conditions import describe
-    from utils.embedding import EmbeddingModel
+    print(f"\n=== {tag}  (n={N}, mean {metric}) ===")
+    print(f"  {tie_stats(Y)}")
+    rows = [(f"fixed {v}", np.nanmean(Y[:, k])) for k, v in enumerate(views)]
+    rows += [(f"best fixed on train ({views[best_fixed]})", np.nanmean(Y[:, best_fixed])),
+             ("random", np.nanmean(np.nanmean(Y, 1))),
+             ("router", got.mean()),
+             ("oracle", np.nanmax(Y, 1).mean())]
+    for name, val in rows:
+        print(f"  {name:<48s} {val:.4f}")
 
-    texts = [describe(v) for v in views]
-    embs = np.asarray(EmbeddingModel().encode(texts, is_query=False), dtype=np.float32)
-    if cache:
-        Path(cache).parent.mkdir(parents=True, exist_ok=True)
-        np.savez(cache, views=np.array(views), embs=embs)
-    return embs
+    counts = Counter(pick.tolist())
+    print("  router picks: " + ", ".join(f"{views[k]} {counts.get(k, 0)}" for k in range(len(views))))
 
-
-class FeatureSpace:
-    """Fixed seeded projections, shared by train and val."""
-
-    def __init__(self, d_emb, d_q=64, d_ctx=64, seed=0):
-        self.pq = RandomProjector(d_emb, d_q, seed=seed)
-        self.pc = RandomProjector(d_emb, d_ctx, seed=seed + 1)
-        self.n_probe = len(probe_vector({}))
-
-    def x(self, rec, use_probe=True, drop_groups=()):
-        q = self.pq(np.asarray(rec["q_emb"], np.float32))
-        if not use_probe:
-            # Query only: the ceiling on any router that decides without
-            # looking at the corpus.
-            return np.concatenate([q, np.zeros(self.pc.d_out, np.float32),
-                                   np.zeros(self.n_probe, np.float32)])
-        return np.concatenate([q,
-                               self.pc(np.asarray(rec["probe_ctx_emb"], np.float32)),
-                               probe_vector(rec["probe"], drop_groups=drop_groups)])
-
-
-def make_groups(recs, fs, views, use_probe=True, drop_groups=(), use_ll=True):
-    out = []
-    for r in recs:
-        cands, f1s, lls = [], [], []
-        for k, v in enumerate(views):
-            if r["f1"].get(v) is None:
-                continue
-            cands.append(k)
-            f1s.append(float(r["f1"][v]))
-            ll = r.get("ll", {}).get(v)
-            lls.append(float(ll) if (use_ll and ll is not None) else np.nan)
-        if len(cands) >= 2:
-            out.append({"x": fs.x(r, use_probe=use_probe, drop_groups=drop_groups),
-                        "cands": cands, "s_f1": f1s, "s_ll": lls, "rec": r})
-    return out
-
-
-def eval_router(router, recs, fs, views, use_probe=True, metric="f1"):
-    vals = []
-    for r in recs:
-        cands = [k for k, v in enumerate(views) if r[metric].get(v) is not None]
-        if not cands:
-            continue
-        x = fs.x(r, use_probe=use_probe)
-        k = cands[int(np.argmax(router.score(x, cands)))]
-        vals.append(float(r[metric][views[k]]))
-    return float(np.mean(vals)) if vals else float("nan")
+    path = Path(out_dir) / f"router_preds_{tag}.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["sample_id", "question", "category", "pick", f"router_{metric}", f"oracle_{metric}"]
+                   + [f"{metric}:{v}" for v in views])
+        for i, r in enumerate(recs):
+            w.writerow([r["sample_id"], r["question"], r.get("category"), views[pick[i]],
+                        got[i], np.nanmax(Y[i])] + list(Y[i]))
+    print(f"  -> {path}")
 
 
 def main():
@@ -121,112 +83,71 @@ def main():
     p.add_argument("--val", required=True)
     p.add_argument("--test", default=None)
     p.add_argument("--metric", default="f1", choices=["f1", "em"])
-    p.add_argument("--tau", type=float, default=1.0)
-    p.add_argument("--tau-ll", type=float, default=1.0)
-    p.add_argument("--delta", type=float, default=0.1)
+    p.add_argument("--tau", type=float, default=0.1, help="target temperature; 0 = hard argmax")
+    p.add_argument("--margin", type=float, nargs="+", default=[0.0],
+                   help="F1 gap below which two views count as a tie; several values = sweep")
+    p.add_argument("--no-probe", action="store_true", help="query embedding only")
     p.add_argument("--hidden", type=int, default=64)
     p.add_argument("--epochs", type=int, default=50)
-    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--lr", type=float, default=3e-3)
     p.add_argument("--weight-decay", type=float, default=1e-4)
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--random-seeds", type=int, default=5)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--log-every", type=int, default=50)
     p.add_argument("--view-emb-cache", default="results/view_embs.npz")
-    p.add_argument("--tau-sweep", nargs="*", type=float, default=None)
-    p.add_argument("--out", default=None)
+    p.add_argument("--out-dir", default="results")
     args = p.parse_args()
 
-    train, val = load_jsonl(args.train), load_jsonl(args.val)
-    test = load_jsonl(args.test) if args.test else None
-    views = train[0]["views"]
-    M = args.metric
+    splits = {"train": load_jsonl(args.train), "val": load_jsonl(args.val)}
+    if args.test:
+        splits["test"] = load_jsonl(args.test)
+    views = splits["train"][0]["views"]
+    print(f"[data] views={views}  " + "  ".join(f"{k}={len(v)}" for k, v in splits.items()))
 
-    print(f"[data] train={len(train)} val={len(val)}"
-          + (f" test={len(test)}" if test else ""))
+    featurize = FeatureBuilder(len(splits["train"][0]["q_emb"]), seed=args.seed,
+                               use_probe=not args.no_probe)
+    data = {k: (recs, featurize(recs), metric_matrix(recs, views, args.metric))
+            for k, recs in splits.items()}
 
-    n_ll = sum(1 for r in train for v in views if r.get("ll", {}).get(v) is not None)
-    print(f"[data] likelihood present on {n_ll}/{len(train)*len(views)} train cells")
-
-    ties = sum(1 for r in train
-               if max(r[M][v] for v in views) - min(r[M][v] for v in views) < 1e-9)
-    all_hi = sum(1 for r in train if min(r[M][v] for v in views) > 0.99)
-    all_lo = sum(1 for r in train if max(r[M][v] for v in views) < 1e-9)
-    print(f"[data] train {M} ties: {100*ties/len(train):.1f}%  "
-          f"(all-correct {100*all_hi/len(train):.1f}%, all-wrong {100*all_lo/len(train):.1f}%)")
-
+    _, X_tr, Y_tr = data["train"]
     view_embs = view_embeddings(views, cache=args.view_emb_cache)
-    fs = FeatureSpace(len(train[0]["q_emb"]), seed=args.seed)
+    best_fixed = int(np.nanargmax(np.nanmean(Y_tr, 0)))
+    sweep = len(args.margin) > 1
 
-    def make(tau=None, **kw):
-        return PLRouter(view_embs, hidden=args.hidden,
-                        tau=args.tau if tau is None else tau,
-                        tau_ll=args.tau_ll, delta=args.delta, lr=args.lr,
-                        weight_decay=args.weight_decay, epochs=args.epochs,
-                        seed=args.seed, **kw)
+    def fit(margin):
+        router = Router(view_embs, hidden=args.hidden, tau=args.tau, margin=margin, lr=args.lr,
+                        weight_decay=args.weight_decay, epochs=args.epochs, seed=args.seed,
+                        log_every=0 if sweep else args.log_every)
+        print(f"[fit] X={X_tr.shape} tau={args.tau} margin={margin} probe={not args.no_probe}")
+        return router.fit(X_tr, Y_tr)
 
-    memrx = make().fit(make_groups(train, fs, views))
-    no_probe = make().fit(make_groups(train, fs, views, use_probe=False))
-    no_ll = make().fit(make_groups(train, fs, views, use_ll=False))
-    cls = make(tau=0.0).fit(make_groups(train, fs, views, use_ll=False))
+    if not sweep:
+        router = fit(args.margin[0])
+        for tag, (recs, X, Y) in data.items():
+            report(tag, recs, X, Y, views, router, best_fixed, args.out_dir, args.metric)
+        return
 
-    tr_means = {v: np.mean([r[M][v] for r in train if r[M].get(v) is not None]) for v in views}
-    bf = max(tr_means, key=tr_means.get)
+    # ---- margin sweep: one row per margin --------------------------------
+    rows = []
+    for m in args.margin:
+        router = fit(m)
+        spread = np.nanmax(Y_tr, 1) - np.nanmin(Y_tr, 1)
+        row = {"margin": m, "tied": (spread <= m + 1e-9).mean(), "floor": router.floor,
+               "loss": router.history[-1]}
+        for tag, (_, X, Y) in data.items():
+            pick = router.predict(X, np.isfinite(Y))
+            row[tag] = Y[np.arange(len(Y)), pick].mean()
+        rows.append(row)
 
-    drop_routers = {g: make().fit(make_groups(train, fs, views, drop_groups=(g,)))
-                    for g in PROBE_FEATURE_GROUPS}
-    sweep_routers = ([(t, make(tau=t).fit(make_groups(train, fs, views)))
-                      for t in args.tau_sweep] if args.tau_sweep else [])
-
-    def report(recs, tag):
-        rows = []
-        for v in views:
-            vals = [r[M][v] for r in recs if r[M].get(v) is not None]
-            rows.append((f"fixed  {v}", float(np.mean(vals))))
-        rows.append((f"best fixed (train-picked: {bf})",
-                     float(np.mean([r[M][bf] for r in recs if r[M].get(bf) is not None]))))
-
-        rnd = []
-        for s in range(args.random_seeds):
-            rg = np.random.default_rng(s)
-            rnd.append(float(np.mean([r[M][str(rg.choice(views))] for r in recs])))
-        rows.append((f"random (+/- {np.std(rnd):.4f})", float(np.mean(rnd))))
-
-        rows.append(("classification (tau=0, F1-only)", eval_router(cls, recs, fs, views, metric=M)))
-        rows.append(("MemRx  - probe (query only)",
-                     eval_router(no_probe, recs, fs, views, use_probe=False, metric=M)))
-        rows.append(("MemRx  - likelihood (F1-only target)",
-                     eval_router(no_ll, recs, fs, views, metric=M)))
-        rows.append(("MemRx", eval_router(memrx, recs, fs, views, metric=M)))
-        rows.append(("oracle", float(np.mean([max(r[M][v] for v in views) for r in recs]))))
-
-        print(f"\n=== {tag}: mean {M} ===")
-        for name, v in rows:
-            print(f"  {name:<40s} {v:.4f}")
-
-        print(f"\n=== probe feature groups ({tag}, dropped one at a time) ===")
-        for g, rr in drop_routers.items():
-            vals = []
-            for r in recs:
-                cands = [k for k, v in enumerate(views) if r[M].get(v) is not None]
-                x = fs.x(r, drop_groups=(g,))
-                vals.append(float(r[M][views[cands[int(np.argmax(rr.score(x, cands)))]]]))
-            print(f"  drop {g:<6s} {np.mean(vals):.4f}")
-
-        if sweep_routers:
-            print(f"\n=== tau sweep ({tag}; tau=0 is the classification baseline) ===")
-            for t, rr in sweep_routers:
-                print(f"  tau={t:<6.3f} {eval_router(rr, recs, fs, views, metric=M):.4f}")
-        return rows
-
-    out_rows = {"val": report(val, "val")}
-    if test:
-        out_rows["test"] = report(test, "test")
-
-    if args.out:
-        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-        with open(args.out, "w", encoding="utf-8") as f:
-            json.dump({"metric": M, **{k: dict(v) for k, v in out_rows.items()}}, f, indent=2)
-        print(f"\n[saved] {args.out}")
-
+    tags = list(data)
+    print(f"\n=== margin sweep (tau={args.tau}, mean {args.metric}) ===")
+    print("  tied = share of train questions whose views are all within margin (target uniform)")
+    print(f"  {'margin':>7s} {'tied':>6s} {'floor':>7s} {'loss':>7s}" + "".join(f"{t:>8s}" for t in tags))
+    for r in rows:
+        print(f"  {r['margin']:>7.3f} {r['tied']:>6.1%} {r['floor']:>7.4f} {r['loss']:>7.4f}"
+              + "".join(f"{r[t]:>8.4f}" for t in tags))
+    for tag, (_, _, Y) in data.items():
+        print(f"  {tag:<6s} best fixed on train {np.nanmean(Y[:, best_fixed]):.4f}   "
+              f"random {np.nanmean(np.nanmean(Y, 1)):.4f}   oracle {np.nanmax(Y, 1).mean():.4f}")
 
 if __name__ == "__main__":
     main()
