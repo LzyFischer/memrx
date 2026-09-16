@@ -1,17 +1,5 @@
-"""
-Minimal Okapi BM25 — no external dependency (rank-bm25 is already in
-requirements.txt for users who want the battle-tested version; this
-self-contained implementation avoids adding a hard dependency just for a
-few hundred short documents per LoCoMo conversation, where performance
-doesn't matter).
-
-Used as the sparse-retrieval channel for augmentation="keywords" — see
-core/retrieval2a.py. Mem0's production system runs BM25 as an independent
-signal fused with semantic similarity (not folded into the embedding),
-because BM25 is exactly strong where dense embeddings are weak: exact
-names, technical terms/acronyms, dates, numbers, rare/discriminative
-words. See docs.mem0.ai/core-concepts/memory-evaluation.
-"""
+"""Minimal Okapi BM25 (no external dependency). Sparse channel for
+augmentation=keywords; see core/retrieval.py."""
 import math
 import re
 from collections import Counter

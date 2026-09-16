@@ -1,9 +1,5 @@
 """
-LoCoMo data loading + scoring for the 2a ablation.
-
-Reuses (near-verbatim) the normalize_answer / f1_score / ANSWER_PROMPT
-logic already validated in run_locomo.py at the repo root, so numbers stay
-comparable with the existing full-context baseline run.
+LoCoMo data loading, QA prompt, and F1/EM scoring.
 
 Get the data file from:
   https://github.com/snap-research/locomo/blob/main/data/locomo10.json
@@ -15,13 +11,8 @@ import re
 import string
 from typing import Any, Dict, List, Tuple
 
-from models.memory_entry import Dialogue
+from core.entry import Dialogue
 
-# Single, uniform answer-generation prompt for every category — no more
-# per-category rule text. The JSON {reasoning, answer} shape is kept (see
-# run_2a_locomo.py::run_one_qa, which parses out "answer" for scoring) since
-# forcing a "reasoning" field first is what stops the model from just
-# echoing a context line's "[N]" label as if that were the answer.
 CATEGORY_NAMES = {1: "multi_hop", 2: "temporal", 3: "open_domain", 4: "single_hop", 5: "adversarial"}
 
 
@@ -46,9 +37,8 @@ def build_dia_id_index(sample: Dict[str, Any]) -> Dict[str, int]:
 
     Needed to resolve QA ``"evidence"`` lists (also given as ``"D1:3"``-style
     strings) against the flat ids stamped onto retrieved MemoryEntry objects
-    via ``metadata["dia_id_start"/"dia_id_end"]`` (see core/chunking.py and
-    core/memory_builder.py::_stamp_source_range), for the retrieval-recall
-    analysis (2a preliminary experiment 3).
+    via ``metadata["dia_id_start"/"dia_id_end"]`` (core/chunking.py,
+    core/summary.py), for the retrieval-recall analysis.
     """
     conv = sample["conversation"]
     index: Dict[str, int] = {}
@@ -99,6 +89,8 @@ def sample_to_dialogues(sample: Dict[str, Any]) -> List[Dialogue]:
 
 
 def build_qa_prompt(context: str, question: str, category: int = 1) -> str:
+    # Same prompt for every category. Asking for "reasoning" before "answer"
+    # stops small models from echoing a context line's "[N]" label as the answer.
     return f"""
 Answer the user's question based on the provided context.
 
@@ -163,12 +155,9 @@ def split_locomo(
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Split LoCoMo conversations by their order in the source file.
 
-    train = data[:n_train]              (used for training / getting per-
-                                          condition feedback, e.g. to fit
-                                          core/router.py's LearnedRouter)
-    val   = data[n_train : n_train+n_val] (used for validation / model
-                                          selection)
-    test  = data[n_train+n_val :]        (everything else, held out)
+    train = data[:n_train]
+    val   = data[n_train : n_train+n_val]
+    test  = data[n_train+n_val :]
 
     Positional, not random — LoCoMo10 only has 10 conversations, so a
     deterministic split keeps every run reproducible without needing to

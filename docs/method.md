@@ -7,7 +7,7 @@
 
 ## 候选集：3+1
 
-`config_2a.py::build_condition_matrix` 收到 4 个：
+`core/conditions.py::build_condition_matrix`：
 
 | view | 构建期 LLM 调用 |
 |---|---|
@@ -16,29 +16,25 @@
 | `augmentation__keywords` | 每 chunk 1 次 |
 | `graph__entity` | 每 chunk 1 次 |
 
-每个维度只留一个代表。原来两个变体/维度是为了回答"哪个变体更好"，和路由问的不是同一个问题，而且两个 summary 变体之间的竞争远强于它们和 graph 的竞争——大部分路由信号会花在维度**内部**的区分上。
+每个维度只留一个代表。两个变体/维度回答的是"哪个变体更好"，和路由问的不是同一个问题；而且同维度的两个变体之间竞争远强于跨维度，大部分路由信号会花在维度内部的区分上。
 
-`core/router.py` 里那些旧 router（PromptRouter / LLMJudgeRouter / OracleRouter）和 `run_2a_locomo.py` 都跟着新矩阵走，不用改。
-
-## 新增/改动文件
+## 代码位置
 
 | 文件 | 内容 |
 |---|---|
-| `config_2a.py` | 候选集收到 4 个 |
-| `core/probe.py` | probe 特征（7 维）+ 加权池化 context embedding |
-| `core/pl_router.py` | PL listwise 路由器 + `mixed_target` |
-| `utils/llm_client.py` | 新增 `gold_answer_logprob` |
-| `eval/curate_memrx.py` | Stage 1：curation |
-| `eval/train_memrx.py` | Stage 2：训练 + val 评估 |
+| `memrx/probe.py` | probe 特征（7 维）+ 加权池化 context embedding |
+| `memrx/pl_router.py` | PL listwise 路由器 + `mixed_target` |
+| `utils/llm_client.py::gold_answer_logprob` | gold answer likelihood |
+| `scripts/curate_memrx.py` | Stage 1：curation |
+| `scripts/train_memrx.py` | Stage 2：训练 + 评估 |
+| `scripts/diagnose_memrx.py` | 路由分布 / headroom / tie 分解 / likelihood 检查 |
 | `tests/smoke_test.py` | 梯度检验 + `mixed_target` 语义 + 合成数据 |
 
-`core/__init__.py` 改成惰性导入，这样 `core.probe` / `core.pl_router` 不再顺带拉进 lancedb。`from core import MemoryBuilder` 行为不变。
-
-没有 early stopping，没有 dev split，固定 epoch 数训到底。也没有加成本项、no-retrieval 候选、两阶段——只有上面两个组件。
+没有 early stopping，没有 dev split，固定 epoch 数训到底。没有成本项、no-retrieval 候选、两阶段——只有下面两个组件。
 
 ## 组件 1：probe
 
-在 `baseline` 视图上做一次 top-10 检索，从**分数分布**和**片段 embedding** 里抽 7 个量，全部是已有产物上的 numpy 运算：
+在 `baseline` 视图上做一次 top-`--probe-n`（默认 20）检索，从**分数分布**和**片段 embedding** 里抽 7 个量，全部是已有产物上的 numpy 运算：
 
 | 组 | 特征 | 含义 |
 |---|---|---|
@@ -49,7 +45,7 @@
 
 `q_cov_gap > 0` 直接量化"必须合并多条才能覆盖 query"。
 
-路由器输入 = `[proj(q_emb, 64) ; proj(ctx_emb, 32) ; probe(7)]`。两个投影是固定随机投影（seeded，不拟合任何数据，因此不泄漏）——384 维原样喂进去会靠维度数压过 7 个统计量。
+路由器输入 = `[proj(q_emb, 64) ; proj(ctx_emb, 64) ; probe(7)]`。两个投影是固定随机投影（seeded，不拟合任何数据，因此不泄漏）——384 维原样喂进去会靠维度数压过 7 个统计量。
 
 ## 组件 2：混合监督
 
@@ -80,27 +76,7 @@ likelihood 缺失（服务器不支持 echo/logprobs）的格子记 `None`，那
 
 ## 跑的顺序
 
-```bash
-# 0. 不需要 vLLM，不需要下载 embedding 模型
-python tests/smoke_test.py
-python eval/train_memrx.py --train results_synth/memrx_train.jsonl \
-    --val results_synth/memrx_val.jsonl --view-emb-cache results_synth/view_embs.npz
-```
-
-```bash
-vllm serve Qwen/Qwen3-1.7B --host 0.0.0.0 --port 8000 --max-model-len 16384
-
-# 1. curation（train = 前 2 个对话，val = 第 3 个，和原 split 一致）
-python eval/curate_memrx.py --split train --out results/memrx_train.jsonl
-python eval/curate_memrx.py --split val   --out results/memrx_val.jsonl
-
-# 2. 训练 + val 报表
-python eval/train_memrx.py --train results/memrx_train.jsonl \
-    --val results/memrx_val.jsonl --tau-sweep 0.0 0.05 0.1 0.3 1.0 \
-    --out results/memrx_report.json
-```
-
-每题 4 次生成 + 4 次打分（不生成）。train 集 199 QA × 2 conv ≈ 1.6k 次生成。可断点续跑，memory store 缓存在 `--cache-dir`。
+见根目录 `README.md`。每题 K 次生成 + K 次打分（不生成）；可断点续跑，memory store 缓存在 `--cache-dir`。
 
 ## 训练脚本会先打出来的一个数
 
@@ -118,19 +94,9 @@ python eval/train_memrx.py --train results/memrx_train.jsonl \
 
 ## 主要风险
 
-`gold_answer_logprob` 可能主要在测**上下文长度**而不是证据质量——各视图的上下文长度差异很大，logprob 很容易跟着长度走。这是我认为最大的隐患，建议 curation 跑完先做两件事：
+`gold_answer_logprob` 可能主要在测**上下文长度**而不是证据质量——各视图的上下文长度差异很大，logprob 很容易跟着长度走。这是最大的隐患，建议 curation 跑完先做两件事：
 
 1. 只在 F1 有区分度的组上，比 `argmax_k l_k` 和 `argmax_k s_k` 的一致率。如果接近随机，说明 likelihood 测的不是同一个东西，拿它打破平局就是在引入偏差——**这条不过，组件 2 作废**。
 2. 算 `l_k` 与上下文 token 数的偏相关。相关性主要来自长度的话，需要先做长度校正。
 
 记录里存了 `n_retrieved`，上下文长度可以从 curation 再补，这两个检查都不需要重跑 LLM。
-
-## 已验证 / 未验证
-
-这边跑过的：手写反向传播的有限差分检验（78 个非零梯度点，最大相对误差 1.5e-07）；`mixed_target` 的 alpha 行为、NaN 回退、`tau=0` 退化；合成数据上整条训练/评估链路能把埋进去的结构 recover 出来。
-
-没跑过的：**真实数据一次都没跑**——这个环境没有 vLLM，也下载不了 sentence-transformers 权重。合成数据只验证代码通路，不验证想法。
-
-
-python eval/analysis/diagnose_memrx.py \
-    --train results/memrx_train.jsonl --val results/memrx_val.jsonl

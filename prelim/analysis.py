@@ -1,53 +1,17 @@
 """
-2a preliminary experiments — computed directly from `results/2a_locomo_results.csv`
-(the long-format output of eval/run_2a_locomo.py).
+Preliminary analyses on the prelim/run_2a_locomo.py CSV (motivation section).
 
-Implements the three exploratory analyses from docs/task.md (8.25):
+  1. win/tie/loss vs baseline per condition, one stacked-bar figure per dimension
+     ("processing is not consistently helpful")
+  2. win rate vs baseline by LoCoMo category, condition x category heatmap
+     ("different query types prefer different processing")
+  3. retrieval phase (recall vs gold evidence) vs answer phase (accuracy given
+     good retrieval), as mean deltas, paired win/tie/loss, and a combined chart
 
-  1. win_tie_loss    — "processing 并不是 consistently 有效的": for every
-                        non-baseline condition, paired win/tie/loss vs
-                        baseline on the same (sample_id, question), one
-                        stacked-bar figure per dimension (summary /
-                        augmentation / graph). See Image 1 in the task.
+Every function takes a DataFrame from `load_results` and returns a table or a
+matplotlib Figure, so they compose on any slice of the data.
 
-  2. query_type_heatmap — "不同种类的query适用什么样的processing": win rate
-                        vs baseline (ties excluded) broken out by LoCoMo
-                        category, condition x category heatmap. See Image 2.
-
-  3. retrieval_vs_answer — "选择processing在不同的阶段有不同的效果": retrieval
-                        phase measured as recall against gold evidence turns,
-                        answer phase measured as accuracy restricted to
-                        questions where retrieval succeeded. Both phases are
-                        reported vs baseline: group-mean deltas
-                        (retrieval_recall_table / conditional_answer_accuracy_table),
-                        paired per-question win/tie/loss
-                        (retrieval_recall_win_tie_loss_table /
-                        answer_accuracy_win_tie_loss_given_good_retrieval),
-                        and a combined absolute-value chart with a baseline
-                        reference line (plot_retrieval_vs_answer_phase).
-
-Experiments 1 and 2 only need columns that eval/run_2a_locomo.py has always
-written (sample_id, question, condition_id, dimension, category_name, f1).
-Experiment 3 needs the evidence_total / evidence_covered / retrieval_recall
-columns added alongside this file — re-run eval/run_2a_locomo.py (or resume
-an existing run; new columns backfill as empty/0 for old rows, which
-correctly means "no recall signal for that row", not "recall = 0" — see
-_only_scored_rows below) to populate them.
-
-All functions take a plain pandas DataFrame (load with `load_results`) and
-return either a table (DataFrame/Series, for eyeballing or a paper table)
-or a matplotlib Figure (for the visual). No function reads or writes CSVs
-by itself except `load_results`, so these compose freely — e.g. run
-win_tie_loss_table on a filtered subset of `df` (a single sample_id, a
-single category) for a slice you're debugging.
-
-Usage as a library:
-    from eval.analysis.preliminary_experiments import load_results, plot_win_tie_loss
-    df = load_results("results/2a_locomo_results.csv")
-    figs = plot_win_tie_loss(df)  # {"summary": Figure, "augmentation": Figure, "graph": Figure}
-
-Usage as a CLI (generates every figure + prints every table):
-    python -m eval.analysis.preliminary_experiments --csv results/2a_locomo_results.csv --out-dir figures/
+    python -m prelim.analysis --csv results/2a_locomo_results_val.csv --out-dir results/figures
 """
 from __future__ import annotations
 
@@ -93,7 +57,7 @@ def load_results(csv_path: str) -> pd.DataFrame:
 
 def _dimension_conditions(df: pd.DataFrame, dimension: str) -> List[str]:
     """condition_ids belonging to one dimension, in the order they first
-    appear in the CSV (i.e. the order config_2a.py's build_condition_matrix
+    appear in the CSV (i.e. the order core/conditions.py's build_condition_matrix
     produced them in) — keeps figure row order stable and matching the
     condition matrix rather than alphabetical."""
     sub = df[df["dimension"] == dimension]
@@ -176,7 +140,7 @@ def plot_win_tie_loss(
     baseline_id: str = BASELINE_ID, dimensions: Optional[Sequence[str]] = None,
     save_dir: Optional[str] = None, file_tag: Optional[str] = None,
 ) -> Dict[str, plt.Figure]:
-    """One 100%-stacked horizontal bar figure per dimension (Image 1 style):
+    """One 100%-stacked horizontal bar figure per dimension :
     each row is a condition (variant) within that dimension, segments are
     win / tie / loss share vs baseline.
 
@@ -244,11 +208,11 @@ def win_rate_by_query_type_table(
 ) -> pd.DataFrame:
     """condition_id x category_name pivot table of win rate vs baseline,
     ties EXCLUDED from the denominator (win / (win + loss), not win / n) —
-    matches Image 2. Cells with zero decided (non-tie) comparisons are NaN,
+    Cells with zero decided (non-tie) comparisons are NaN,
     not 0, so they render blank rather than misleadingly "worst".
 
     condition_id is relabeled "dimension: variant" (e.g.
-    "augmentation: keywords") to match Image 2's row labels.
+    "augmentation: keywords") for readable row labels.
     """
     paired = _pair_with_baseline(df, metric, baseline_id)
 
@@ -286,7 +250,7 @@ def plot_win_rate_heatmap(
     save_path: Optional[str] = None,
 ) -> plt.Figure:
     """Diverging heatmap of win rate vs baseline (ties excluded), condition x
-    category — Image 2. Centered at 50% (below = red, above = blue) since
+    category. Centered at 50% (below = red, above = blue) since
     50% is "no signal either way" for a win/loss-only rate.
     """
     pivot = win_rate_by_query_type_table(df, metric=metric, tie_epsilon=tie_epsilon,
@@ -329,7 +293,7 @@ def _only_scored_rows(df: pd.DataFrame) -> pd.DataFrame:
     if "retrieval_recall" not in df.columns:
         raise KeyError(
             "This results CSV has no retrieval_recall column — re-run "
-            "eval/run_2a_locomo.py (this repo's version, after the "
+            "prelim/run_2a_locomo.py (this repo's version, after the "
             "evidence-tracking changes) to populate it before calling "
             "the experiment-3 functions."
         )
@@ -390,7 +354,7 @@ def plot_retrieval_recall_win_tie_loss(
     dimensions: Optional[Sequence[str]] = None, save_dir: Optional[str] = None,
 ) -> Dict[str, plt.Figure]:
     """plot_win_tie_loss, but on retrieval_recall instead of f1/em — same
-    Image-1-style stacked bars, one figure per dimension, now answering
+    stacked bars (as in experiment 1), one figure per dimension, now answering
     "does this condition retrieve the right evidence more often than
     baseline" rather than "does this condition answer better than baseline".
     """
@@ -480,8 +444,8 @@ def plot_answer_accuracy_win_tie_loss_given_good_retrieval(
     dimensions: Optional[Sequence[str]] = None, save_dir: Optional[str] = None,
 ) -> Dict[str, plt.Figure]:
     """plot_win_tie_loss on the answer-phase-only comparison from
-    answer_accuracy_win_tie_loss_given_good_retrieval — same Image-1-style
-    stacked bars, but restricted to questions where both the condition and
+    answer_accuracy_win_tie_loss_given_good_retrieval — same stacked-bar style
+    as experiment 1, but restricted to questions where both the condition and
     baseline actually retrieved the gold evidence, so the win/tie/loss is
     purely about answer quality."""
     both_good = _both_good_retrieval_subset(df, recall_threshold, baseline_id)

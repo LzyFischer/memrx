@@ -5,7 +5,6 @@ Supports standard models and Qwen3-Embedding variants.
 from typing import Any, List, Optional
 
 import numpy as np
-import logging
 
 import config
 
@@ -32,7 +31,6 @@ class EmbeddingModel:
             "qwen3-8b": "Qwen/Qwen3-Embedding-8B",
         }
         path = model_map.get(self.model_name, self.model_name)
-        logging.set_verbosity_error()
         try:
             self.model = SentenceTransformer(
                 path,
@@ -43,7 +41,6 @@ class EmbeddingModel:
             print("Qwen3 loaded with flash_attention_2")
         except Exception:
             self.model = SentenceTransformer(path, trust_remote_code=True)
-        logging.set_verbosity_warning()
         self.dimension = self.model.get_sentence_embedding_dimension()
         self.model_type = "qwen3_sentence_transformer"
         self.supports_query_prompt = "query" in getattr(self.model, "prompts", {})
@@ -65,9 +62,6 @@ class EmbeddingModel:
 
     def encode_single(self, text: str, is_query: bool = False) -> np.ndarray:
         return self.encode([text], is_query=is_query)[0]
-
-    def encode_query(self, queries: List[str]) -> np.ndarray:
-        return self.encode(queries, is_query=True)
 
     def encode_documents(self, documents: List[str]) -> np.ndarray:
         return self.encode(documents, is_query=False)

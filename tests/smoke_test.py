@@ -19,8 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 
-from core.pl_router import PLRouter, mixed_target, _segment_softmax
-from core.probe import PROBE_FEATURE_NAMES
+from memrx.pl_router import PLRouter, mixed_target, _segment_softmax
+from memrx.probe import PROBE_FEATURE_NAMES
 
 VIEWS = ["baseline", "summary__session_level", "augmentation__keywords", "graph__entity"]
 D = 384
@@ -172,6 +172,6 @@ if __name__ == "__main__":
     test_mixed_target()
     make_synthetic("results_synth")
     print("\nall checks passed — now run:\n"
-          "  python eval/train_memrx.py --train results_synth/memrx_train.jsonl \\\n"
+          "  python scripts/train_memrx.py --train results_synth/memrx_train.jsonl \\\n"
           "      --val results_synth/memrx_val.jsonl "
           "--view-emb-cache results_synth/view_embs.npz")

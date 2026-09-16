@@ -1,7 +1,7 @@
 """
 Stage 2 — fit the MemRx router on train, score it on val (and test).
 
-    python eval/train_memrx.py --train results/memrx_train.jsonl \
+    python scripts/train_memrx.py --train results/memrx_train.jsonl \
                                --val   results/memrx_val.jsonl \
                                --test  results/memrx_test.jsonl
 
@@ -31,8 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 
-from core.pl_router import PLRouter, RandomProjector
-from core.probe import PROBE_FEATURE_GROUPS, probe_vector
+from memrx.pl_router import PLRouter, RandomProjector
+from memrx.probe import PROBE_FEATURE_GROUPS, probe_vector
 
 
 def load_jsonl(path):
@@ -55,10 +55,10 @@ def view_embeddings(views: List[str], cache: Optional[str] = None):
         blob = np.load(cache, allow_pickle=True)
         if list(blob["views"]) == list(views):
             return blob["embs"]
-    from core.router import _CONDITION_DESCRIPTIONS
+    from core.conditions import describe
     from utils.embedding import EmbeddingModel
 
-    texts = [_CONDITION_DESCRIPTIONS.get(v, v.replace("__", " ")) for v in views]
+    texts = [describe(v) for v in views]
     embs = np.asarray(EmbeddingModel().encode(texts, is_query=False), dtype=np.float32)
     if cache:
         Path(cache).parent.mkdir(parents=True, exist_ok=True)

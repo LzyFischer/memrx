@@ -2,7 +2,7 @@
 Diagnostics for a MemRx run. Reads the curated JSONL only — no vLLM, no
 embedding model, no generations.
 
-    python eval/analysis/diagnose_memrx.py \
+    python scripts/diagnose_memrx.py \
         --train results/memrx_train.jsonl --val results/memrx_val.jsonl
 
 Five questions, in the order they should be asked:
@@ -36,12 +36,12 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 
-from eval.train_memrx import FeatureSpace, load_jsonl, make_groups, view_embeddings
-from core.pl_router import PLRouter
+from scripts.train_memrx import FeatureSpace, load_jsonl, make_groups, view_embeddings
+from memrx.pl_router import PLRouter
 
 
 def entropy(counts, K):

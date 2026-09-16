@@ -61,8 +61,7 @@ def coerce_json_list(data: Any, context: str = "") -> list:
     """Small local models (e.g. Qwen3-0.6B) frequently ignore "return a JSON
     ARRAY" and wrap the array in an object instead — {"keywords": [...]},
     {"entries": [...]}, or even a bare single item with no array at all.
-    Used by every extraction call-site (memory_builder / augmentation_builder
-    / graph_builder) so the coercion logic lives in exactly one place.
+    Used by every extraction call-site (core/summary, augmentation, graph) so the coercion logic lives in exactly one place.
 
     Returns [] (never raises) if nothing list-shaped can be salvaged, so
     callers can treat "extraction found nothing" and "extraction was
@@ -75,7 +74,7 @@ def coerce_json_list(data: Any, context: str = "") -> list:
         if list_fields:
             return list_fields[0]
         # bare single object with no array anywhere -> treat it as a
-        # one-element list (covers single_entry_mode's dict-not-array case)
+        # one-element list (covers the summary prompt's dict-not-array case)
         if data:
             return [data]
     if context:
@@ -162,7 +161,7 @@ class LLMClient:
         elif not self.enable_thinking:
             # Local vLLM serving Qwen3: thinking is ON by default via the chat
             # template. If the caller wants it OFF (e.g. cheap metadata
-            # extraction calls in augmentation/graph builders where a long
+            # extraction calls in core/augmentation.py / core/graph.py where a long
             # reasoning trace just burns latency for a 0.6B model), ask vLLM
             # to skip it at the template level instead of paying for the
             # tokens and stripping them after the fact. Requires vLLM's Qwen3

@@ -10,26 +10,24 @@ pass over the LLM:
   ll[view]                           mean log P(gold | q, ctx_view), the
                                      uncensored one
 
-Single stage: each view is retrieved from and read from on its own, exactly
-as in run_2a_locomo.py. The only additions are the probe pass and the
-likelihood pass.
+Each view is retrieved from and read from on its own; the additions on top of
+plain per-view QA are the probe pass and the likelihood pass.
 
     vllm serve Qwen/Qwen3-1.7B --host 0.0.0.0 --port 8000 --max-model-len 16384
 
-    python eval/curate_memrx.py --split train --out results/memrx_train.jsonl
-    python eval/curate_memrx.py --split val   --out results/memrx_val.jsonl
+    python scripts/curate_memrx.py --split train --out results/memrx_train.jsonl
+    python scripts/curate_memrx.py --split val   --out results/memrx_val.jsonl
+    python scripts/curate_memrx.py --split test  --out results/memrx_test.jsonl
 
-Cost per question: K generations (K=4) plus K scoring calls that generate
-nothing. Resumable by (sample_id, question); memory stores are cached under
---cache-dir so a resumed run does not re-pay the LLM extraction that built
-them.
+Cost per question: K generations plus K scoring calls that generate nothing.
+Resumable by (sample_id, question); memory stores are cached under
+--cache-dir so a resumed run does not re-pay the LLM extraction.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import pickle
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -39,19 +37,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 
-from config_2a import build_condition_matrix, RETRIEVAL_TOP_K, WINDOW_SIZE, OVERLAP_SIZE
-from core.memory_store import MemoryStore
-from core.probe import compute_probe_features, probe_retrieve
-from core.retrieval2a import retrieve
-from core.treatments import build_memory_store
-from eval.locomo_loader import (
-    build_dia_id_index, build_qa_prompt, evidence_flat_ids, exact_match, f1_score,
-    load_locomo, sample_to_dialogues, split_locomo,
-)
+import config
+from core.conditions import build_condition_matrix
+from core.qa import answer_question, format_context, gold_answer
+from core.retrieval import retrieve
+from core.views import get_store
+from memrx.probe import compute_probe_features, probe_retrieve
 from utils.embedding import EmbeddingModel
 from utils.llm_client import LLMClient
+from utils.locomo import (
+    build_dia_id_index, evidence_flat_ids, exact_match, f1_score,
+    load_locomo, sample_to_dialogues, split_locomo,
+)
 
-MAX_CHARS = 6000
 PROBE_VIEW = "baseline"
 
 
@@ -59,17 +57,6 @@ def _r(v, nd=5):
     if isinstance(v, np.ndarray):
         return [round(float(x), nd) for x in v]
     return round(float(v), nd)
-
-
-def format_context(entries, max_chars: int = MAX_CHARS) -> str:
-    parts, total = [], 0
-    for i, e in enumerate(entries, 1):
-        line = f"[{i}] {e.lossless_restatement}"
-        total += len(line)
-        if total > max_chars:
-            break
-        parts.append(line)
-    return "\n".join(parts)
 
 
 def scoring_prefix(context: str, question: str) -> str:
@@ -85,81 +72,21 @@ def scoring_prefix(context: str, question: str) -> str:
             f"Question: {question}\nAnswer: ")
 
 
-# ---------------------------------------------------------------------- #
-def _cache_path(cache_dir, sample_id, cid, w, o):
-    return os.path.join(cache_dir, f"{sample_id}__{cid}__w{w}o{o}.pkl")
-
-
-def save_store(store: MemoryStore, path: str) -> None:
-    ids = list(store.entries.keys())
-    blob = {
-        "entries": [store.entries[i].model_dump() for i in ids],
-        "embs": np.stack([store._embeddings[i] for i in ids]) if ids else np.zeros((0, 1)),
-        "graph": {k: list(v) for k, v in store.graph.items()},
-    }
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as f:
-        pickle.dump(blob, f)
-
-
-def load_store(path: str, embedding_model) -> MemoryStore:
-    from models.memory_entry import MemoryEntry
-
-    with open(path, "rb") as f:
-        blob = pickle.load(f)
-    store = MemoryStore(embedding_model)
-    for k, d in enumerate(blob["entries"]):
-        e = MemoryEntry(**d)
-        store.entries[e.entry_id] = e
-        store._embeddings[e.entry_id] = blob["embs"][k]
-    store.graph = {k: set(v) for k, v in blob["graph"].items()}
-    return store
-
-
-def get_store(dialogues, condition, llm, emb, sample_id, cache_dir, window, overlap):
-    path = _cache_path(cache_dir, sample_id, condition.condition_id, window, overlap)
-    if os.path.exists(path):
-        return load_store(path, emb), True
-    store = build_memory_store(dialogues, condition, llm, emb,
-                               window_size=window, overlap=overlap)
-    save_store(store, path)
-    return store, False
-
-
-# ---------------------------------------------------------------------- #
-def answer_one(llm, context, question, category) -> str:
-    prompt = build_qa_prompt(context, question, category)
-    try:
-        raw = llm.chat_completion([{"role": "user", "content": prompt}],
-                                  temperature=0.0, max_tokens=1024).strip()
-    except Exception as e:
-        return f"[error] {e}"
-    try:
-        parsed = llm.extract_json(raw)
-        if isinstance(parsed, dict):
-            a = parsed.get("answer")
-            if isinstance(a, str) and a.strip():
-                return a.strip()
-    except Exception:
-        pass
-    return raw
-
-
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--data", default="data/locomo10.json")
+    p.add_argument("--data", default=config.DATA_PATH)
     p.add_argument("--split", choices=["train", "val", "test", "all"], default="train")
     p.add_argument("--n-train", type=int, default=2)
     p.add_argument("--n-val", type=int, default=1)
     p.add_argument("--out", required=True)
     p.add_argument("--cache-dir", default="results/store_cache")
-    p.add_argument("--model", default="Qwen/Qwen3-1.7B")
-    p.add_argument("--base-url", default="http://localhost:8000/v1")
+    p.add_argument("--model", default=config.LLM_MODEL)
+    p.add_argument("--base-url", default=config.OPENAI_BASE_URL)
     p.add_argument("--api-key", default="EMPTY")
-    p.add_argument("--top-k", type=int, default=RETRIEVAL_TOP_K)
+    p.add_argument("--top-k", type=int, default=config.RETRIEVAL_TOP_K)
     p.add_argument("--probe-n", type=int, default=20)
-    p.add_argument("--window-size", type=int, default=WINDOW_SIZE)
-    p.add_argument("--overlap", type=int, default=OVERLAP_SIZE)
+    p.add_argument("--window-size", type=int, default=config.WINDOW_SIZE)
+    p.add_argument("--overlap", type=int, default=config.OVERLAP_SIZE)
     p.add_argument("--max-questions", type=int, default=None)
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--no-likelihood", action="store_true",
@@ -214,17 +141,14 @@ def main():
             t = time.time()
             stores[c.condition_id], cached = get_store(
                 dialogues, c, llm, emb, sample_id, args.cache_dir,
-                args.window_size, args.overlap)
+                window_size=args.window_size, overlap=args.overlap)
             tag = "cached" if cached else f"built in {time.time()-t:.0f}s"
             print(f"  [{c.condition_id:<24s}] {len(stores[c.condition_id]):4d} units ({tag})")
 
         for qi, qa in enumerate(qas):
             question = qa["question"]
             category = int(qa.get("category", 1))
-            gold = qa.get("answer", "")
-            if category == 5 and not gold:
-                gold = "Not mentioned in the conversation"
-            gold = str(gold)
+            gold = gold_answer(qa)
 
             q_emb = emb.encode_single(question, is_query=True)
 
@@ -236,14 +160,14 @@ def main():
             # ---- per-view retrieval + context ------------------------
             contexts, n_retrieved = {}, {}
             for v in views:
-                ents = retrieve(stores[v], question, cond_by_id[v], llm=llm, top_k=args.top_k)
+                ents = retrieve(stores[v], question, cond_by_id[v], top_k=args.top_k)
                 contexts[v] = format_context(ents)
                 n_retrieved[v] = len(ents)
 
             # ---- generation (F1/EM) ----------------------------------
             with ThreadPoolExecutor(max_workers=args.workers) as ex:
                 preds = dict(zip(views, ex.map(
-                    lambda v: answer_one(llm, contexts[v], question, category), views)))
+                    lambda v: answer_question(llm, contexts[v], question, category), views)))
             n_gen += len(views)
 
             # ---- likelihood ------------------------------------------

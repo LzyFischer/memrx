@@ -10,11 +10,11 @@ the actual per-question direction, and the sign test says whether the
 win-lose imbalance survives the number of questions you have.
 
 Everything here is a pure lookup over `2a_locomo_results_*.csv` plus the
-router selection frames produced by eval/run_router_locomo.py — no LLM
+router selection frames produced by prelim/run_router_baselines.py — no LLM
 calls, no memory rebuilds.
 
 Pairing key is (sample_id, question). A "system" here is any per-question
-selection: a fixed condition (`baseline`, `summary__fine_grained`, ...) or a
+selection: a fixed condition (`baseline`, `graph__entity`, ...) or a
 router's selected rows.
 """
 from __future__ import annotations

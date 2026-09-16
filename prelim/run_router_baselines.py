@@ -1,62 +1,24 @@
 """
-Query-level routing, evaluated as a SELECTION over an already-computed full
-condition matrix — NOT by rebuilding memory on demand per query.
+Training-free router baselines, evaluated as a SELECTION over an already
+computed full condition matrix — no memory store is rebuilt.
 
-Why: a question is only known after a conversation's memory has already
-been built (turns accumulate first, questions get asked later against
-whatever memory already exists) — a router can't decide "which condition
-to build" per query, because there's no query yet at build time. So the
-memory-build step still has to build EVERY condition for a conversation,
-exactly like run_2a_locomo.py already does. Routing only happens at
-retrieval/answer time: for each question, pick which of the already-built
-conditions' stores to read the answer from.
+Memory is built before any question is known, so every view has to be built
+anyway; routing only picks which already-built view to read from. Scoring a
+router is therefore a lookup over the prelim/run_2a_locomo.py CSV (the judge
+router still makes one LLM call per question for the decision itself).
 
-That means router evaluation needs zero new LLM/embedding calls to the
-memory pipeline — it's a pure lookup over the full-matrix CSV
-run_2a_locomo.py already produced (one row per sample_id x condition_id x
-question). (`--routers judge` and `--routers naive` do call the LLM once per
-question to make the routing DECISION, but never rebuild a store.)
+Prints (1) mean metric by condition x category with one row per router, and
+(2) per-question win / tie / lose of every router against every fixed
+condition and against the other routers.
 
-This script routes with one or more strategies and prints:
-  1. the mean-F1 pivot (all 7 fixed conditions + one row per router), and
-  2. per-question win / tie / lose for every router against every fixed
-     condition and against the other routers.
-
-Routers available (see core/router.py for what each one is testing):
-    random   lower-bound control, uniform pick; run over several seeds
-    naive    open-ended LLM prompt, fills in the 3 dimensions
-    judge    LLM judge, closed-set pick from the described candidate menu
-    learned  logistic regression on train-split feedback
-    oracle   per-question argmax = upper bound, not a real router
-
-Workflow:
-    # 1) full matrix on train — the feedback LearnedRouter fits on
-    python eval/run_2a_locomo.py --data data/locomo10.json --split train --out-dir results
-
-    # 2) full matrix on val — what the routers will SELECT from
-    python eval/run_2a_locomo.py --data data/locomo10.json --split val --out-dir results
-
-    # 3) route val's questions with everything at once: F1 table + W/T/L grid
-    python eval/run_router_locomo.py \
+    python prelim/run_2a_locomo.py --split val --out-dir results
+    python prelim/run_router_baselines.py \
         --results-csv results/2a_locomo_results_val.csv \
-        --routers random judge learned oracle \
-        --train-csv results/2a_locomo_results_train.csv \
-        --model Qwen/Qwen3-0.6B --base-url http://localhost:8000/v1 \
-        --out-dir results
+        --routers random judge oracle --out-dir results
 
-    # cheap pass, no LLM and no train CSV needed (random + oracle only):
-    python eval/run_router_locomo.py \
-        --results-csv results/2a_locomo_results_val.csv \
-        --routers random oracle --out-dir results
-
-    # 4) once a router is picked on val, get the final table on test
-    python eval/run_2a_locomo.py --data data/locomo10.json --split test --out-dir results
-    python eval/run_router_locomo.py \
-        --results-csv results/2a_locomo_results_test.csv \
-        --routers random naive judge learned oracle \
-        --train-csv results/2a_locomo_results_train.csv \
-        --model Qwen/Qwen3-0.6B --base-url http://localhost:8000/v1 \
-        --out-dir results --wtl-by-category
+    # no LLM needed:
+    python prelim/run_router_baselines.py \
+        --results-csv results/2a_locomo_results_val.csv --routers random oracle
 """
 import argparse
 import os
@@ -69,12 +31,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root on 
 import numpy as np
 import pandas as pd
 
-from config_2a import build_condition_matrix
-from core.router import ROUTER_NAMES, build_router
-from eval.analysis.win_tie_lose import (
-    build_wtl_table, print_wtl_table, selection_frame, wtl_by_category,
-)
-from eval.run_2a_locomo import print_summary
+import config
+from core.conditions import build_condition_matrix
+from prelim.routers import ROUTER_NAMES, build_router
+from prelim.run_2a_locomo import print_summary
+from prelim.win_tie_lose import build_wtl_table, print_wtl_table, selection_frame, wtl_by_category
 
 
 def route_and_select(df: pd.DataFrame, router, router_label: str,
@@ -103,10 +64,8 @@ def route_and_select(df: pd.DataFrame, router, router_label: str,
         predicted = router.predict(q["question"], int(q["category"]), sample_id=sample_id).condition_id
         row = lookup.get((sample_id, q["question"], predicted))
         if row is None:
-            # predicted a condition_id not present in this CSV — shouldn't
-            # happen since the matrix is the fixed 7 from
-            # config_2a.build_condition_matrix(), but don't silently drop
-            # the question either; fall back to baseline's row.
+            # condition_id not present in this CSV (e.g. an older matrix);
+            # fall back to baseline's row rather than dropping the question.
             missing += 1
             row = lookup.get((sample_id, q["question"], "baseline"))
             if row is None:
@@ -131,13 +90,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--results-csv", required=True,
                    help="full-matrix CSV from run_2a_locomo.py, e.g. results/2a_locomo_results_val.csv")
-    p.add_argument("--routers", nargs="+", choices=ROUTER_NAMES, default=None,
-                   help=f"one or more of {ROUTER_NAMES} (default: random judge learned oracle)")
-    p.add_argument("--router", choices=ROUTER_NAMES, default=None,
-                   help="deprecated single-router form, kept so old commands keep working")
-    p.add_argument("--train-csv", default=None,
-                   help="2a_locomo_results_train.csv from `run_2a_locomo.py --split train` "
-                        "(required for the learned router)")
+    p.add_argument("--routers", nargs="+", choices=ROUTER_NAMES, default=ROUTER_NAMES)
     p.add_argument("--metric", default="f1", choices=["f1", "em"],
                    help="metric routers are scored and compared on")
     p.add_argument("--random-seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4],
@@ -147,7 +100,7 @@ def main():
                         "it is gold metadata a deployed router would not have.")
     p.add_argument("--wtl-refs", default="all", choices=["all", "conditions", "baseline", "best"],
                    help="what to compare each router against: every fixed condition AND every other "
-                        "router (all), the 7 fixed conditions only, baseline only, or the "
+                        "router (all), the fixed conditions only, baseline only, or the "
                         "best-mean fixed condition only")
     p.add_argument("--wtl-tol", type=float, default=1e-9,
                    help="per-question margin below which a difference counts as a tie. "
@@ -155,20 +108,14 @@ def main():
     p.add_argument("--wtl-by-category", action="store_true",
                    help="additionally print per-category W/T/L for each router vs baseline and "
                         "vs the best fixed condition")
-    p.add_argument("--model", default="Qwen/Qwen3-0.6B", help="only used by the naive/judge routers")
-    p.add_argument("--base-url", default="http://localhost:8000/v1",
-                   help="only used by the naive/judge routers")
+    p.add_argument("--model", default=config.LLM_MODEL, help="judge router only")
+    p.add_argument("--base-url", default=config.OPENAI_BASE_URL, help="judge router only")
     p.add_argument("--api-key", default="EMPTY")
     p.add_argument("--out-dir", default="results")
     args = p.parse_args()
 
-    router_names = args.routers or ([args.router] if args.router else
-                                    ["random", "judge", "learned", "oracle"])
-    router_names = list(dict.fromkeys(router_names))  # de-dup, keep order
+    router_names = list(dict.fromkeys(args.routers))  # de-dup, keep order
     metric = args.metric
-
-    if "learned" in router_names and not args.train_csv:
-        p.error("the learned router requires --train-csv (see file docstring for the workflow)")
 
     df = pd.read_csv(args.results_csv)
     df["sample_id"] = df["sample_id"].astype(str)
@@ -183,17 +130,11 @@ def main():
           f"{len(condition_ids)} conditions")
 
     # --- shared dependencies, built once and only if actually needed ----
-    llm = embedding_model = train_df = None
-    if {"naive", "judge"} & set(router_names):
+    llm = None
+    if "judge" in router_names:
         from utils.llm_client import LLMClient
         llm = LLMClient(api_key=args.api_key, model=args.model, base_url=args.base_url,
                         use_streaming=False)
-    if "learned" in router_names:
-        from utils.embedding import EmbeddingModel
-        embedding_model = EmbeddingModel()
-        train_df = pd.read_csv(args.train_csv)
-        train_df["sample_id"] = train_df["sample_id"].astype(str)
-        print(f"[learned router] fitting on {len(train_df)} rows from {args.train_csv}")
 
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -204,11 +145,8 @@ def main():
         seeds = args.random_seeds if name == "random" else [None]
         frames = []
         for seed in seeds:
-            router = build_router(
-                name, llm=llm, embedding_model=embedding_model, train_df=train_df,
-                results_df=df, seed=seed or 0, metric=metric,
-                judge_use_category=args.judge_use_category,
-            )
+            router = build_router(name, llm=llm, results_df=df, seed=seed or 0, metric=metric,
+                                  judge_use_category=args.judge_use_category)
             print(f"\n[{label}{'' if seed is None else f' seed={seed}'}] routing "
                   f"{n_questions} questions...")
             sel = route_and_select(df, router, label, seed=seed)
@@ -257,10 +195,8 @@ def main():
         ref_ids = condition_ids
     references = {cid: selection_frame(df, metric, condition_id=cid) for cid in ref_ids}
     if args.wtl_refs == "all":
-        # Router-vs-router too: "learned beats random" is the claim that
-        # actually shows routing learned something, and it is a different
-        # question from "learned beats baseline". Seeded routers contribute
-        # their first seed as the reference so pairing stays a clean 1:1.
+        # Router-vs-router too ("judge beats random" is a different claim from
+        # "judge beats baseline"). Seeded routers contribute their first seed.
         for label, frames in systems.items():
             references[label] = frames[0]
 
