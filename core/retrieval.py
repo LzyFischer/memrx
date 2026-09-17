@@ -2,9 +2,14 @@
 
   baseline / summary      top-k cosine
   augmentation            dense + BM25 over raw+attributes text, weighted RRF (0.7 / 0.3)
-  graph                   alpha * dense + (1 - alpha) * entity-match score, one ranked top-k
+  graph                   dense + relevance passed from the top dense chunks to their
+                          entity / semantic neighbours (core/graph.py)
 """
 from typing import Dict, List, Optional
+
+import numpy as np
+
+import config
 
 from core.conditions import Condition
 from core.entry import MemoryEntry
@@ -39,16 +44,26 @@ def _retrieve_keywords_hybrid(store: MemoryStore, query: str, top_k: int) -> Lis
     return [e for e in (store.get(i) for i in fused[:top_k]) if e is not None]
 
 
-def _retrieve_graph(store: MemoryStore, query: str, top_k: int, alpha: float = 0.7) -> List[MemoryEntry]:
-    """Mem0-style: the entity graph is a ranking signal, not a neighbour dump."""
-    ents, dense = store.semantic_search_scored(query, top_k=len(store))
-    ent_scores = store.entity_index().scores(query)
-    if not ents or not ent_scores:
-        return ents[:top_k]                                   # no query entity: pure dense
-    lo, hi = min(dense), max(dense)
-    g_max = max(ent_scores.values())
-    ranked = sorted(
-        zip(ents, dense),
-        key=lambda ed: -(alpha * (ed[1] - lo) / (hi - lo + 1e-9)
-                         + (1 - alpha) * ent_scores.get(ed[0].entry_id, 0.0) / g_max))
-    return [e for e, _ in ranked[:top_k]]
+def _retrieve_graph(store: MemoryStore, query: str, top_k: int, seeds: int = None,
+                    lam: float = None) -> List[MemoryEntry]:
+    """score(v) = cos(q, v) + lam * max_{i in seeds, i ~ v} cos(q, i)
+
+    The top `seeds` chunks by cosine pass their own similarity to their graph
+    neighbours (seeds can boost each other). A chunk that is not near the query
+    but is linked to a strong match moves up. lam = 0 is exactly baseline.
+    """
+    seeds = config.GRAPH_SEEDS if seeds is None else seeds
+    lam = config.GRAPH_LAMBDA if lam is None else lam
+    if lam <= 0 or seeds <= 0:
+        return store.semantic_search(query, top_k=top_k)
+    ids, E = store.embedding_matrix()
+    if not ids:
+        return []
+    cos = E @ store.embedding_model.encode_single(query, is_query=True)
+    graph = store.chunk_graph()
+    passed = np.zeros(len(ids))
+    for i in np.argsort(-cos, kind="stable")[:seeds]:
+        for j in graph.neighbors[i]:
+            passed[j] = max(passed[j], cos[i])
+    score = cos.astype(np.float64) + lam * passed
+    return [store.entries[ids[i]] for i in np.argsort(-score, kind="stable")[:top_k]]

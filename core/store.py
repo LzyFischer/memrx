@@ -1,7 +1,7 @@
 """MemoryStore: one in-memory retrieval backend shared by every view.
 
 All views use the same backend (numpy cosine similarity, a BM25 index, and an
-entity index) so that the only difference between views is
+entity graph) so that the only difference between views is
 the treatment applied at construction time, not the retrieval implementation.
 LoCoMo conversations have a few hundred units at most, so no vector DB is
 needed.
@@ -26,7 +26,7 @@ class MemoryStore:
         self._embeddings: Dict[str, np.ndarray] = {}
         self._bm25: Optional[SimpleBM25] = None    # built lazily
         self._bm25_ids: List[str] = []
-        self._entity_index = None                  # graph view, built lazily
+        self._graph = None                         # graph view, built lazily
 
     # ------------------------------------------------------------------ build
     def add_batch(self, entries: List[MemoryEntry]) -> None:
@@ -37,7 +37,7 @@ class MemoryStore:
             self.entries[e.entry_id] = e
             self._embeddings[e.entry_id] = v
         self._bm25 = None
-        self._entity_index = None
+        self._graph = None
 
     # ------------------------------------------------------------------ dense
     def semantic_search(self, query: str, top_k: int = 5) -> List[MemoryEntry]:
@@ -66,12 +66,18 @@ class MemoryStore:
         return [self._bm25_ids[i] for i in order if scores[i] > 0]
 
     # ------------------------------------------------------------------ graph
-    def entity_index(self):
-        """Entity -> chunk index over metadata["entities"] (graph view)."""
-        if self._entity_index is None:
-            from core.graph import EntityIndex
-            self._entity_index = EntityIndex(self.entries)
-        return self._entity_index
+    def embedding_matrix(self):
+        """(ids in store order, (N, d) L2-normalised embeddings)."""
+        ids = list(self.entries.keys())
+        return ids, (np.stack([self._embeddings[i] for i in ids]) if ids else np.zeros((0, 1)))
+
+    def chunk_graph(self):
+        """Entity + semantic kNN chunk graph (graph view), built on first use."""
+        if self._graph is None:
+            from core.graph import ChunkGraph
+            ids, E = self.embedding_matrix()
+            self._graph = ChunkGraph(ids, self.entries, E)
+        return self._graph
 
     def get(self, entry_id: str) -> Optional[MemoryEntry]:
         return self.entries.get(entry_id)

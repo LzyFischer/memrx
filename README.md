@@ -14,7 +14,7 @@ core/                     memory views (shared by everything)
   chunking.py             raw chunks, the shared unit every view processes
   summary.py              summary: chunk -> one dense LLM restatement
   augmentation.py         augmentation: raw chunk + entities/events/time/keywords
-  graph.py                graph: chunk entities, entity-match score for ranking
+  graph.py                graph: chunk graph, entity + semantic kNN edges
   store.py                MemoryStore: dense + BM25 + graph, pickle cache
   bm25.py
   views.py                build_memory_store / get_store (cached)
@@ -27,6 +27,7 @@ memrx/                    the method
 scripts/                  MemRx pipeline
   curate_memrx.py         stage 1: per-question JSONL (probe, prediction + F1/EM per view)
   train_memrx.py          stage 2: fit router, report vs fixed/random/oracle, per-question CSV
+  eval_retrieval.py       evidence recall@k per view / query type, no reader (graph tuning)
 prelim/                   motivation experiments, see docs/prelim.md
   run_2a_locomo.py        full view x question matrix -> CSV
   analysis.py             win/tie/loss, per-type heatmap, retrieval vs answer phase
@@ -58,7 +59,7 @@ python scripts/curate_memrx.py --split train --out results/memrx_train.jsonl
 python scripts/curate_memrx.py --split val   --out results/memrx_val.jsonl
 
 # 2. train + report (also writes results/router_preds_{train,val}.csv)
-python scripts/train_memrx.py --train results/memrx_train.jsonl --val results/memrx_val.jsonl
+python scripts/train_memrx.py --train results/memrx_train.jsonl --val results/memrx_test.jsonl
 
 # ablations are flags
 python scripts/train_memrx.py ... --no-probe      # query embedding only
@@ -66,3 +67,6 @@ python scripts/train_memrx.py ... --tau 0         # hard argmax classifier
 ```
 
 Memory stores are cached in `results/store_cache/`, keyed by `(sample_id, view, window, overlap)` and shared between `scripts/curate_memrx.py` and `prelim/run_2a_locomo.py`, so the LLM extraction is paid once per conversation.
+
+python scripts/eval_retrieval.py --split test --views baseline graph__entity --by-category \
+    --graph-max-entity-df 0.05 0.1 0.3 --graph-seeds 3 5 15

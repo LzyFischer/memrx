@@ -3,7 +3,7 @@ variant per dimension (3+1), all applied per raw chunk.
 
     summary__structured       chunk -> C(chunk)          one dense LLM restatement per chunk
     augmentation__attributes  chunk -> chunk + A(chunk)  MemInsight-lite attributes
-    graph__entity             chunk -> G(chunk)          Mem0-style entity links as a ranking signal
+    graph__entity             chunk -> G(chunk)          entity + semantic kNN edges, relevance passed from top matches
 
 Each view is described by one line of behaviour. The MemRx router encodes
 these descriptions instead of learning a per-view output head, so a view not
@@ -45,9 +45,9 @@ VIEW_DESCRIPTIONS: Dict[str, str] = {
         "keywords appended for dense and keyword retrieval. Good when the question uses different "
         "words than the conversation or asks about a date.",
     "graph__entity":
-        "Raw chunks linked through the entities they mention; chunks sharing entities named in "
-        "the question are ranked higher on top of semantic search. Good for questions about "
-        "specific people, places, or objects that are spread across the conversation.",
+        "Raw chunks linked to chunks that share a rare entity and to their most similar chunks; "
+        "the best semantic matches pass relevance to their linked chunks. Good for questions whose "
+        "evidence is spread over related parts of the conversation.",
 }
 
 

@@ -20,11 +20,9 @@ _PROMPT = """Your task is to compress the following dialogues into a SINGLE memo
 {dialogue_text}
 
 [Requirements]
-1. Write timestamps to the lossless restatement with format YYYY-MM-DDTHH:MM:SS or null.
-1. **Complete Coverage**:  Ensure ALL information in the dialogues is captured.
-2. **Exactly ONE entry**: The output JSON array MUST contain exactly one element.
+1. Must write timestamps to the lossless restatement with format YYYY-MM-DDTHH:MM:SS.
+2. **Complete Coverage**:  Ensure ALL information in the dialogues is captured.
 3. **Force Disambiguation**: Absolutely PROHIBIT using pronouns (he, she, it, they, this, that) and relative time (yesterday, today, last week, tomorrow). Use full names and absolute ISO 8601 timestamps inline.
-4. **Lossless Information**: The single lossless_restatement must be a self-contained, independently understandable text that includes all relevant information.
 
 [Output Format]
 Return a JSON array with EXACTLY ONE element:
